@@ -1,0 +1,10 @@
+[project]
+name = "orchestrator_db"
+version = "1.0.0"
+description = "Database models and migrations for orchestrator"
+requires-python = ">=3.12"
+dependencies = [
+    "asyncpg",
+    "python-dotenv",
+    "rich",
+]

@@ -52,6 +52,14 @@ MIGRATIONS = [
     "6_functions.sql",
     "7_triggers.sql",
     "8_orchestrator_chat.sql",
+    "9_servers.sql",
+    "10_sync_operations.sql",
+    "11_sync_batches.sql",
+    "12_server_environments.sql",
+    "13_config_files.sql",
+    "14_sync_operation_logs.sql",
+    "15_server_backups.sql",
+    "16_environment_sync_configs.sql",
 ]
 
 def main():
@@ -172,6 +180,13 @@ def main():
         table.add_row("agent_logs", "Event logs")
         table.add_row("system_logs", "Application logs")
         table.add_row("orchestrator_chat", "Human-orchestrator chat history")
+        table.add_row("servers", "Server definitions and configurations")
+        table.add_row("sync_operations", "Individual sync operation tracking")
+        table.add_row("sync_batches", "Batch operation management")
+        table.add_row("server_environments", "Environment variable storage")
+        table.add_row("config_files", "Configuration file management")
+        table.add_row("sync_operation_logs", "Detailed operation logging")
+        table.add_row("server_backups", "Backup tracking and management")
         table.add_row("indexes", "Performance indexes")
         table.add_row("functions", "Trigger functions")
         table.add_row("triggers", "Auto-update triggers")

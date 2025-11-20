@@ -29,6 +29,17 @@ from modules import database
 from modules.orchestrator_service import OrchestratorService, get_orchestrator_tools
 from modules.agent_manager import AgentManager
 from modules.orch_database_models import OrchestratorAgent
+from modules.environment_sync import get_environment_sync_manager, initialize_environment_sync_manager
+from modules.environment_sync_db import (
+    create_server, get_server, list_servers, update_server_status,
+    create_sync_operation, get_sync_operation, update_sync_operation_status, list_sync_operations,
+    create_sync_batch, get_sync_batch, update_sync_batch_status, list_sync_batches,
+    get_environment_sync_config, get_server_statistics
+)
+from modules.config_models import (
+    ServerDefinition, AuthMethod, ServerEnvironment, SyncOperation, SyncBatch,
+    ConfigFile, CreateServerRequest, SyncOperationRequest, SyncBatchRequest
+)
 
 logger = get_logger()
 ws_manager = get_websocket_manager()
@@ -152,6 +163,13 @@ async def lifespan(app: FastAPI):
     # Store in app state for access in endpoints
     app.state.orchestrator_service = orchestrator_service
     app.state.orchestrator = orchestrator
+
+    # Initialize environment synchronization manager
+    logger.info("Initializing environment synchronization manager...")
+    env_sync_config = await get_environment_sync_config()
+    env_sync_manager = initialize_environment_sync_manager(env_sync_config)
+    app.state.env_sync_manager = env_sync_manager
+    logger.success("Environment synchronization manager initialized")
 
     logger.success("Backend initialization complete")
 
@@ -584,6 +602,483 @@ async def list_agents_endpoint():
 
     except Exception as e:
         logger.error(f"Failed to list agents: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ═══════════════════════════════════════════════════════════
+# ENVIRONMENT SYNCHRONIZATION API ENDPOINTS
+# ═══════════════════════════════════════════════════════════
+
+
+@app.post("/api/env-sync/servers")
+async def create_server_endpoint(request: CreateServerRequest):
+    """
+    Create a new server definition for environment synchronization.
+
+    Args:
+        request: Server creation request
+
+    Returns:
+        Created server information
+    """
+    try:
+        logger.http_request("POST", "/api/env-sync/servers")
+
+        # Extract server data
+        server_data = request.server
+
+        # Create server in database
+        server_id = await create_server(
+            name=server_data.name,
+            hostname=server_data.hostname,
+            port=server_data.port,
+            environment_name=server_data.environment.name,
+            server_type=server_data.server_type,
+            auth_method=server_data.auth_method.dict(),
+            config_paths=server_data.config_paths,
+            description=server_data.description,
+            backup_path=server_data.backup_path,
+            tags=server_data.tags,
+            metadata=server_data.metadata
+        )
+
+        # Get created server
+        server = await get_server(server_id)
+
+        logger.http_request("POST", "/api/env-sync/servers", 201)
+        return {"status": "success", "server": server}
+
+    except Exception as e:
+        logger.error(f"Failed to create server: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/env-sync/servers")
+async def list_servers_endpoint(
+    environment: Optional[str] = None,
+    server_type: Optional[str] = None,
+    tags: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0
+):
+    """
+    List servers with optional filtering.
+
+    Query Parameters:
+        environment: Filter by environment name
+        server_type: Filter by server type
+        tags: Comma-separated tags to filter by
+        status: Filter by server status
+        limit: Maximum number of servers to return
+        offset: Number of servers to skip
+
+    Returns:
+        List of servers matching criteria
+    """
+    try:
+        logger.http_request("GET", "/api/env-sync/servers")
+
+        # Parse tags
+        tag_list = tags.split(',') if tags else None
+
+        servers = await list_servers(
+            environment=environment,
+            server_type=server_type,
+            tags=tag_list,
+            status=status,
+            limit=limit,
+            offset=offset
+        )
+
+        logger.http_request("GET", "/api/env-sync/servers", 200)
+        return {"status": "success", "servers": servers}
+
+    except Exception as e:
+        logger.error(f"Failed to list servers: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/env-sync/servers/{server_id}")
+async def get_server_endpoint(server_id: str):
+    """
+    Get server by ID.
+
+    Args:
+        server_id: Server UUID
+
+    Returns:
+        Server information
+    """
+    try:
+        logger.http_request("GET", f"/api/env-sync/servers/{server_id}")
+
+        server_uuid = uuid.UUID(server_id)
+        server = await get_server(server_uuid)
+
+        if not server:
+            logger.http_request("GET", f"/api/env-sync/servers/{server_id}", 404)
+            raise HTTPException(status_code=404, detail="Server not found")
+
+        logger.http_request("GET", f"/api/env-sync/servers/{server_id}", 200)
+        return {"status": "success", "server": server}
+
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid server ID format")
+    except Exception as e:
+        logger.error(f"Failed to get server: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/env-sync/operations")
+async def create_sync_operation_endpoint(request: SyncOperationRequest):
+    """
+    Create a new synchronization operation.
+
+    Args:
+        request: Sync operation request
+
+    Returns:
+        Created operation information
+    """
+    try:
+        logger.http_request("POST", "/api/env-sync/operations")
+
+        # Get environment sync manager
+        env_sync_manager = app.state.env_sync_manager
+
+        # Create operation
+        operation = await env_sync_manager.create_sync_operation(
+            server_id=request.operation.server_id,
+            config_files=request.operation.config_files,
+            source_data=request.operation.source_data,
+            operation_type=request.operation.operation_type,
+            dry_run=request.operation.dry_run,
+            initiated_by=request.operation.initiated_by,
+            metadata=request.operation.metadata
+        )
+
+        logger.http_request("POST", "/api/env-sync/operations", 201)
+        return {"status": "success", "operation": operation.dict()}
+
+    except Exception as e:
+        logger.error(f"Failed to create sync operation: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/env-sync/operations/{operation_id}/execute")
+async def execute_sync_operation_endpoint(operation_id: str):
+    """
+    Execute a synchronization operation.
+
+    Args:
+        operation_id: Operation UUID
+
+    Returns:
+        Operation execution results
+    """
+    try:
+        logger.http_request("POST", f"/api/env-sync/operations/{operation_id}/execute")
+
+        # Get environment sync manager
+        env_sync_manager = app.state.env_sync_manager
+
+        # Execute operation
+        operation_uuid = uuid.UUID(operation_id)
+        updated_operation = await env_sync_manager.execute_sync_operation(operation_uuid)
+
+        logger.http_request("POST", f"/api/env-sync/operations/{operation_id}/execute", 200)
+        return {"status": "success", "operation": updated_operation.dict()}
+
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid operation ID format")
+    except Exception as e:
+        logger.error(f"Failed to execute sync operation: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/env-sync/operations")
+async def list_sync_operations_endpoint(
+    server_id: Optional[str] = None,
+    status: Optional[str] = None,
+    initiated_by: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0
+):
+    """
+    List synchronization operations.
+
+    Query Parameters:
+        server_id: Filter by server ID
+        status: Filter by operation status
+        initiated_by: Filter by initiator
+        limit: Maximum number of operations to return
+        offset: Number of operations to skip
+
+    Returns:
+        List of synchronization operations
+    """
+    try:
+        logger.http_request("GET", "/api/env-sync/operations")
+
+        # Parse server_id if provided
+        server_uuid = uuid.UUID(server_id) if server_id else None
+
+        operations = await list_sync_operations(
+            server_id=server_uuid,
+            status=status,
+            initiated_by=initiated_by,
+            limit=limit,
+            offset=offset
+        )
+
+        logger.http_request("GET", "/api/env-sync/operations", 200)
+        return {"status": "success", "operations": operations}
+
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid server ID format")
+    except Exception as e:
+        logger.error(f"Failed to list sync operations: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/env-sync/operations/{operation_id}")
+async def get_sync_operation_endpoint(operation_id: str):
+    """
+    Get synchronization operation by ID.
+
+    Args:
+        operation_id: Operation UUID
+
+    Returns:
+        Operation information
+    """
+    try:
+        logger.http_request("GET", f"/api/env-sync/operations/{operation_id}")
+
+        operation_uuid = uuid.UUID(operation_id)
+        operation = await get_sync_operation(operation_uuid)
+
+        if not operation:
+            logger.http_request("GET", f"/api/env-sync/operations/{operation_id}", 404)
+            raise HTTPException(status_code=404, detail="Operation not found")
+
+        logger.http_request("GET", f"/api/env-sync/operations/{operation_id}", 200)
+        return {"status": "success", "operation": operation}
+
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid operation ID format")
+    except Exception as e:
+        logger.error(f"Failed to get sync operation: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/env-sync/batches")
+async def create_sync_batch_endpoint(request: SyncBatchRequest):
+    """
+    Create a new batch synchronization operation.
+
+    Args:
+        request: Batch sync request
+
+    Returns:
+        Created batch operation information
+    """
+    try:
+        logger.http_request("POST", "/api/env-sync/batches")
+
+        # Get environment sync manager
+        env_sync_manager = app.state.env_sync_manager
+
+        # Create batch operation
+        batch = await env_sync_manager.create_batch_sync(
+            name=request.batch.name,
+            server_ids=request.batch.server_ids,
+            config_files=request.batch.config_files,
+            source_data=request.batch.source_data,
+            initiated_by=request.batch.initiated_by,
+            parallel_execution=request.batch.parallel_execution,
+            metadata=request.batch.metadata
+        )
+
+        logger.http_request("POST", "/api/env-sync/batches", 201)
+        return {"status": "success", "batch": batch.dict()}
+
+    except Exception as e:
+        logger.error(f"Failed to create sync batch: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/env-sync/batches/{batch_id}/execute")
+async def execute_sync_batch_endpoint(batch_id: str):
+    """
+    Execute a batch synchronization operation.
+
+    Args:
+        batch_id: Batch UUID
+
+    Returns:
+        Batch execution results
+    """
+    try:
+        logger.http_request("POST", f"/api/env-sync/batches/{batch_id}/execute")
+
+        # Get environment sync manager
+        env_sync_manager = app.state.env_sync_manager
+
+        # Execute batch
+        batch_uuid = uuid.UUID(batch_id)
+        updated_batch = await env_sync_manager.execute_batch_sync(batch_uuid)
+
+        logger.http_request("POST", f"/api/env-sync/batches/{batch_id}/execute", 200)
+        return {"status": "success", "batch": updated_batch.dict()}
+
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid batch ID format")
+    except Exception as e:
+        logger.error(f"Failed to execute sync batch: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/env-sync/batches")
+async def list_sync_batches_endpoint(
+    status: Optional[str] = None,
+    initiated_by: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0
+):
+    """
+    List batch synchronization operations.
+
+    Query Parameters:
+        status: Filter by batch status
+        initiated_by: Filter by initiator
+        limit: Maximum number of batches to return
+        offset: Number of batches to skip
+
+    Returns:
+        List of batch synchronization operations
+    """
+    try:
+        logger.http_request("GET", "/api/env-sync/batches")
+
+        batches = await list_sync_batches(
+            status=status,
+            initiated_by=initiated_by,
+            limit=limit,
+            offset=offset
+        )
+
+        logger.http_request("GET", "/api/env-sync/batches", 200)
+        return {"status": "success", "batches": batches}
+
+    except Exception as e:
+        logger.error(f"Failed to list sync batches: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/env-sync/batches/{batch_id}")
+async def get_sync_batch_endpoint(batch_id: str):
+    """
+    Get batch synchronization operation by ID.
+
+    Args:
+        batch_id: Batch UUID
+
+    Returns:
+        Batch operation information
+    """
+    try:
+        logger.http_request("GET", f"/api/env-sync/batches/{batch_id}")
+
+        batch_uuid = uuid.UUID(batch_id)
+        batch = await get_sync_batch(batch_uuid)
+
+        if not batch:
+            logger.http_request("GET", f"/api/env-sync/batches/{batch_id}", 404)
+            raise HTTPException(status_code=404, detail="Batch not found")
+
+        logger.http_request("GET", f"/api/env-sync/batches/{batch_id}", 200)
+        return {"status": "success", "batch": batch}
+
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid batch ID format")
+    except Exception as e:
+        logger.error(f"Failed to get sync batch: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/env-sync/statistics")
+async def get_server_statistics_endpoint():
+    """
+    Get server and sync operation statistics.
+
+    Returns:
+        Statistics for monitoring and dashboard
+    """
+    try:
+        logger.http_request("GET", "/api/env-sync/statistics")
+
+        stats = await get_server_statistics()
+
+        logger.http_request("GET", "/api/env-sync/statistics", 200)
+        return {"status": "success", "statistics": stats}
+
+    except Exception as e:
+        logger.error(f"Failed to get server statistics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/env-sync/validate")
+async def validate_configuration_endpoint(
+    config_data: Dict[str, str],
+    config_files: List[Dict[str, Any]],
+    server_id: Optional[str] = None
+):
+    """
+    Validate configuration data.
+
+    Args:
+        config_data: Configuration data by file path
+        config_files: List of configuration file definitions
+        server_id: Optional server ID for context validation
+
+    Returns:
+        Validation results for each configuration file
+    """
+    try:
+        logger.http_request("POST", "/api/env-sync/validate")
+
+        # Get environment sync manager
+        env_sync_manager = app.state.env_sync_manager
+
+        # Parse config files
+        parsed_config_files = []
+        for cf in config_files:
+            parsed_config_files.append(ConfigFile(**cf))
+
+        # Parse server_id if provided
+        server_uuid = uuid.UUID(server_id) if server_id else None
+
+        # Validate configuration
+        validation_results = await env_sync_manager.validate_configuration(
+            config_data=config_data,
+            config_files=parsed_config_files,
+            server_id=server_uuid
+        )
+
+        # Convert results to dict format
+        results_dict = {}
+        for path, result in validation_results.items():
+            results_dict[path] = result.dict()
+
+        logger.http_request("POST", "/api/env-sync/validate", 200)
+        return {"status": "success", "validation_results": results_dict}
+
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid server ID format")
+    except Exception as e:
+        logger.error(f"Failed to validate configuration: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

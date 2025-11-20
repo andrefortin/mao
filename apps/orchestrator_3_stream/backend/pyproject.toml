@@ -13,6 +13,10 @@ dependencies = [
     "rich",
     "pydantic",
     "python-dotenv",
+    "cryptography",
+    "boto3",
+    "toml",
+    "paramiko",
 ]
 
 [tool.uv]
