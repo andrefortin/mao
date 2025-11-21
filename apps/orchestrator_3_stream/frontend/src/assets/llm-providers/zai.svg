@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Z.AI logo">
+  <rect width="64" height="64" rx="12" fill="#161616" />
+  <path
+    d="M18 18h28v8L26.4 46H46v8H18v-8l19.6-20H18z"
+    fill="#ffffff"
+  />
+</svg>
