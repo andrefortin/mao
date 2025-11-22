@@ -19,20 +19,17 @@ Reference: Copied from apps/orchestrator_1_term/modules/single_agent_prompt.py
 """
 
 import json
-import os
 from pathlib import Path
 from typing import Any, Optional, Dict
 
 from claude_agent_sdk import query, ClaudeAgentOptions, AssistantMessage, TextBlock
 
 from .logger import OrchestratorLogger
+from . import llm_settings, openrouter_client
 
 
 # Configure module logger
 logger = OrchestratorLogger()
-
-# Fast model for summarization (Haiku for speed and cost)
-FAST_MODEL = "claude-haiku-4-5-20251001"
 
 # Load prompt templates from files
 PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
@@ -50,7 +47,7 @@ EVENT_SUMMARIZER_SYSTEM_PROMPT = (
 
 
 async def fast_claude_query(
-    prompt: str, model: str = FAST_MODEL, system_prompt: Optional[str] = None
+    prompt: str, model: Optional[str] = None, system_prompt: Optional[str] = None
 ) -> str:
     """
     Execute a fast, single-shot Claude query without session management.
@@ -63,7 +60,7 @@ async def fast_claude_query(
 
     Args:
         prompt: The user prompt to send to Claude
-        model: Claude model to use (defaults to FAST_MODEL/Haiku for speed/cost)
+        model: Claude-compatible model to use (defaults to provider fast model)
         system_prompt: Optional system prompt to guide Claude's behavior
 
     Returns:
@@ -87,19 +84,32 @@ async def fast_claude_query(
         - Falls back to empty string on API errors
     """
     try:
+        runtime = llm_settings.get_runtime_settings()
+        resolved_model = model or runtime.fast_model
+
+        if runtime.provider_id == "openrouter":
+            logger.debug(
+                f"Making OpenRouter fast query with model={resolved_model}, "
+                f"prompt_length={len(prompt)}"
+            )
+            return await openrouter_client.complete_text(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                model=resolved_model,
+            )
+
+        resolved_model = model or llm_settings.get_fast_model()
+
         logger.debug(
-            f"Making fast Claude query with model={model}, "
+            f"Making fast Claude query with model={resolved_model}, "
             f"prompt_length={len(prompt)}"
         )
 
         # Use Claude Agent SDK's query() function for one-off interactions
-        # Pass ANTHROPIC_API_KEY explicitly to ensure subprocess has access
-        env_vars = {}
-        if "ANTHROPIC_API_KEY" in os.environ:
-            env_vars["ANTHROPIC_API_KEY"] = os.environ["ANTHROPIC_API_KEY"]
+        env_vars = llm_settings.build_runtime_env()
 
         options = ClaudeAgentOptions(
-            model=model,
+            model=resolved_model,
             system_prompt=system_prompt,
             permission_mode="bypassPermissions",  # No user interaction needed
             env=env_vars,  # Ensure API key is available to subprocess
@@ -119,6 +129,9 @@ async def fast_claude_query(
 
         return response_text.strip()
 
+    except openrouter_client.OpenRouterError as e:
+        logger.error(f"OpenRouter fast query failed: {e}", exc_info=True)
+        return ""
     except Exception as e:
         logger.error(f"Fast Claude query failed: {e}", exc_info=True)
         # Return empty string on error (graceful degradation)
@@ -259,7 +272,7 @@ async def summarize_event(event_data: dict[str, Any], event_type: str) -> str:
     # Execute fast query to generate summary
     try:
         summary = await fast_claude_query(
-            prompt=prompt, system_prompt=system_prompt, model=FAST_MODEL
+            prompt=prompt, system_prompt=system_prompt, model=llm_settings.get_fast_model()
         )
 
         # If we got a response, use it; otherwise use fallback

@@ -223,6 +223,178 @@ class WebSocketManager:
         )
 
     # ========================================================================
+    # Environment Synchronization Events
+    # ========================================================================
+
+    async def broadcast_server_created(self, server_data: dict):
+        """Broadcast server creation event"""
+        await self.broadcast({
+            "type": "environment_sync_server_created",
+            "server": server_data,
+            "timestamp": datetime.now().isoformat()
+        })
+
+    async def broadcast_server_updated(self, server_id: str, server_data: dict):
+        """Broadcast server update event"""
+        await self.broadcast({
+            "type": "environment_sync_server_updated",
+            "server_id": server_id,
+            "server": server_data,
+            "timestamp": datetime.now().isoformat()
+        })
+
+    async def broadcast_server_deleted(self, server_id: str):
+        """Broadcast server deletion event"""
+        await self.broadcast({
+            "type": "environment_sync_server_deleted",
+            "server_id": server_id,
+            "timestamp": datetime.now().isoformat()
+        })
+
+    async def broadcast_server_status_change(self, server_id: str, old_status: str, new_status: str):
+        """Broadcast server status change"""
+        await self.broadcast({
+            "type": "environment_sync_server_status_changed",
+            "server_id": server_id,
+            "old_status": old_status,
+            "new_status": new_status,
+            "timestamp": datetime.now().isoformat()
+        })
+
+    async def broadcast_sync_operation_created(self, operation_data: dict):
+        """Broadcast sync operation creation event"""
+        await self.broadcast({
+            "type": "environment_sync_operation_created",
+            "operation": operation_data,
+            "timestamp": datetime.now().isoformat()
+        })
+
+    async def broadcast_sync_operation_update(self, operation_data: dict):
+        """Broadcast sync operation update event"""
+        await self.broadcast({
+            "type": "environment_sync_operation_update",
+            "operation": operation_data,
+            "timestamp": datetime.now().isoformat()
+        })
+
+    async def broadcast_sync_operation_completed(self, operation_data: dict):
+        """Broadcast sync operation completion event"""
+        await self.broadcast({
+            "type": "environment_sync_operation_completed",
+            "operation": operation_data,
+            "timestamp": datetime.now().isoformat()
+        })
+
+    async def broadcast_sync_operation_failed(self, operation_data: dict):
+        """Broadcast sync operation failure event"""
+        await self.broadcast({
+            "type": "environment_sync_operation_failed",
+            "operation": operation_data,
+            "timestamp": datetime.now().isoformat()
+        })
+
+    async def broadcast_sync_batch_created(self, batch_data: dict):
+        """Broadcast sync batch creation event"""
+        await self.broadcast({
+            "type": "environment_sync_batch_created",
+            "batch": batch_data,
+            "timestamp": datetime.now().isoformat()
+        })
+
+    async def broadcast_sync_batch_update(self, batch_data: dict):
+        """Broadcast sync batch update event"""
+        await self.broadcast({
+            "type": "environment_sync_batch_update",
+            "batch": batch_data,
+            "timestamp": datetime.now().isoformat()
+        })
+
+    async def broadcast_sync_batch_completed(self, batch_data: dict):
+        """Broadcast sync batch completion event"""
+        await self.broadcast({
+            "type": "environment_sync_batch_completed",
+            "batch": batch_data,
+            "timestamp": datetime.now().isoformat()
+        })
+
+    async def broadcast_sync_batch_failed(self, batch_data: dict):
+        """Broadcast sync batch failure event"""
+        await self.broadcast({
+            "type": "environment_sync_batch_failed",
+            "batch": batch_data,
+            "timestamp": datetime.now().isoformat()
+        })
+
+    async def broadcast_config_validation_result(self, validation_data: dict):
+        """Broadcast configuration validation result"""
+        await self.broadcast({
+            "type": "environment_sync_validation_result",
+            "validation": validation_data,
+            "timestamp": datetime.now().isoformat()
+        })
+
+    async def broadcast_sync_progress_update(self, operation_id: str, progress_data: dict):
+        """Broadcast sync progress update"""
+        await self.broadcast({
+            "type": "environment_sync_progress_update",
+            "operation_id": operation_id,
+            "progress": progress_data,
+            "timestamp": datetime.now().isoformat()
+        })
+
+    async def broadcast_batch_progress_update(self, batch_id: str, progress_data: dict):
+        """Broadcast batch sync progress update"""
+        await self.broadcast({
+            "type": "environment_sync_batch_progress_update",
+            "batch_id": batch_id,
+            "progress": progress_data,
+            "timestamp": datetime.now().isoformat()
+        })
+
+    async def broadcast_server_connectivity_change(self, server_id: str, connectivity_data: dict):
+        """Broadcast server connectivity change"""
+        await self.broadcast({
+            "type": "environment_sync_connectivity_change",
+            "server_id": server_id,
+            "connectivity": connectivity_data,
+            "timestamp": datetime.now().isoformat()
+        })
+
+    async def broadcast_config_backup_created(self, server_id: str, backup_data: dict):
+        """Broadcast configuration backup creation"""
+        await self.broadcast({
+            "type": "environment_sync_backup_created",
+            "server_id": server_id,
+            "backup": backup_data,
+            "timestamp": datetime.now().isoformat()
+        })
+
+    async def broadcast_config_sync_rollback(self, operation_id: str, rollback_data: dict):
+        """Broadcast configuration sync rollback"""
+        await self.broadcast({
+            "type": "environment_sync_rollback",
+            "operation_id": operation_id,
+            "rollback": rollback_data,
+            "timestamp": datetime.now().isoformat()
+        })
+
+    async def broadcast_security_alert(self, alert_data: dict):
+        """Broadcast security alert"""
+        await self.broadcast({
+            "type": "environment_sync_security_alert",
+            "alert": alert_data,
+            "timestamp": datetime.now().isoformat()
+        })
+
+    async def broadcast_environment_sync_statistics(self, statistics_data: dict):
+        """Broadcast environment synchronization statistics"""
+        await self.broadcast({
+            "type": "environment_sync_statistics",
+            "statistics": statistics_data,
+            "timestamp": datetime.now().isoformat()
+        })
+
+    # ========================================================================
     # Connection Management
     # ========================================================================
 

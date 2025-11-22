@@ -1,6 +1,8 @@
 # Orchestrator Database Schema & Models
 
-Central database schema and model definitions for the Multi-Agent Orchestration system.
+**AI-native database schema and model definitions for the Multi-Agent Orchestration system**
+
+🤖 **Optimized for AI Agents**: Designed specifically to support multi-agent workflows, agent lifecycle management, and AI-driven development patterns.
 
 ## 📁 Directory Structure
 
@@ -29,6 +31,29 @@ This directory serves as the **single source of truth** for:
 1. **Database Schema** - PostgreSQL table definitions (via migrations)
 2. **Data Models** - Pydantic models for type-safe database operations
 3. **Model Distribution** - Syncing models to orchestrator apps
+4. **AI Agent Support** - Optimized data structures for multi-agent workflows
+
+## 🤖 Multi-Agent Architecture Support
+
+The database schema is specifically designed to support AI-native development workflows:
+
+### Agent Lifecycle Management
+- **Agent Creation/Deletion**: Full lifecycle tracking with timestamps
+- **Session Management**: Claude SDK session persistence across interactions
+- **Cost Tracking**: Token usage and cost monitoring for budget optimization
+- **Status Management**: Real-time agent status updates (idle, executing, blocked)
+
+### Event-Driven Architecture
+- **Unified Logging**: All agent activities captured in structured event logs
+- **Hook Integration**: Pre/post tool execution tracking
+- **Message Blocks**: Text, thinking, and tool use event preservation
+- **Task Organization**: Events grouped by task_slug for workflow analysis
+
+### AI-Optimized Queries
+- **Performance Indexes**: Optimized for agent-centric query patterns
+- **Temporal Queries**: Efficient time-based event retrieval
+- **Agent Filtering**: Fast status and metadata-based filtering
+- **Context Management**: Efficient conversation history storage
 
 ## 🚀 Quick Start
 
@@ -42,7 +67,7 @@ uv run apps/orchestrator_db/run_migrations.py
 
 This will:
 - ✅ Create all 5 tables (orchestrator_agents, agents, prompts, agent_logs, system_logs)
-- ✅ Add performance indexes
+- ✅ Add performance indexes optimized for AI agent workflows
 - ✅ Set up trigger functions for auto-timestamps
 - ✅ Preserve existing data (idempotent operations)
 
@@ -56,26 +81,27 @@ python apps/orchestrator_db/sync_models.py
 
 This copies models to:
 - `apps/orchestrator_1_term/modules/orch_database_models.py`
-- `apps/orchestrator_2_stream/server/models.py`
+- `apps/orchestrator_3_stream/backend/modules/orch_database_models.py`
 
 ## 📋 Files Explained
 
-### `models.py` - Pydantic Models
+### `models.py` - AI-Optimized Pydantic Models
 
-**Purpose:** Central definition of all database models with automatic type conversion.
+**Purpose:** Central definition of all database models with automatic type conversion and AI agent support.
 
 **Models:**
 - `OrchestratorAgent` - Singleton orchestrator that manages other agents
 - `Agent` - Managed agent registry with status and usage tracking
-- `Prompt` - Prompt history from engineers or orchestrator
-- `AgentLog` - Unified event log (hooks + responses)
-- `SystemLog` - Application-level system logs
+- `Prompt` - Prompt history from engineers or orchestrator with AI metadata
+- `AgentLog` - Unified event log (hooks + responses) with block structure
+- `SystemLog` - Application-level system logs for debugging AI workflows
 
-**Features:**
+**AI-Enhanced Features:**
 - Automatic UUID conversion (handles asyncpg UUID objects)
-- JSON field parsing (metadata, payload)
-- Decimal to float conversion for costs
-- Type validation with Pydantic
+- JSON field parsing (metadata, payload, AI context)
+- Decimal to float conversion for cost tracking
+- Type validation with Pydantic for agent reliability
+- **AI Agent Metadata Support**: Special fields for AI agent context
 
 **Usage:**
 ```python
@@ -84,247 +110,278 @@ from models import Agent, OrchestratorAgent, Prompt, AgentLog, SystemLog
 # Automatically handles UUID conversion from database
 agent = Agent(**row_dict)
 print(agent.id)  # Works with both UUID objects and strings
+
+# AI agent context support
+agent_logs = await get_agent_logs(
+    agent_id=agent_uuid,
+    task_slug="ai-analysis-task",
+    limit=50
+)
 ```
 
-### `migrations/` - Database Schema
+### `migrations/` - Database Schema for AI Workflows
 
-**Purpose:** Ordered, idempotent SQL migrations that preserve data.
+**Purpose:** Ordered, idempotent SQL migrations optimized for multi-agent systems.
 
-**Why This Approach:**
-- ✅ **No Data Loss** - Uses `CREATE IF NOT EXISTS` instead of `DROP TABLE`
-- ✅ **Modularity** - One file per concern
-- ✅ **Clear Dependencies** - Numbered by creation order (0-7)
-- ✅ **Idempotent** - Safe to run multiple times
-- ✅ **Production Ready** - Follows industry best practices
+**AI-Specific Design:**
+- ✅ **Agent-Centric Design**: Tables optimized for agent lifecycle queries
+- ✅ **Event Storage**: Efficient storage of AI agent events and responses
+- ✅ **Metadata Support**: JSONB fields for flexible AI context storage
+- ✅ **Performance Optimization**: Indexes for common AI agent query patterns
 
 **Order of Execution:**
 1. `0_orchestrator_agents.sql` - Singleton orchestrator (no dependencies)
-2. `1_agents.sql` - Managed agents (no dependencies)
-3. `2_prompts.sql` - Prompt history (FK → agents)
-4. `3_agent_logs.sql` - Event logs (FK → agents)
-5. `4_system_logs.sql` - System logs (nullable FK → agents)
-6. `5_indexes.sql` - Performance indexes (all tables)
-7. `6_functions.sql` - Trigger functions (for auto-timestamps)
+2. `1_agents.sql` - Managed agents with AI metadata support
+3. `2_prompts.sql` - Prompt history with AI context (FK → agents)
+4. `3_agent_logs.sql` - Event logs with block structure (FK → agents)
+5. `4_system_logs.sql` - System logs for AI debugging (nullable FK → agents)
+6. `5_indexes.sql` - Performance indexes for AI agent workflows
+7. `6_functions.sql` - Trigger functions for auto-timestamps
 8. `7_triggers.sql` - Auto-update triggers
 
 **See:** `migrations/README.md` for detailed migration documentation.
 
-### `run_migrations.py` - Migration Runner
+### `run_migrations.py` - AI-Aware Migration Runner
 
-**Purpose:** Execute all migrations in order with rich terminal output.
+**Purpose:** Execute all migrations with rich terminal output and AI system validation.
 
-**Features:**
+**AI-Specific Features:**
 - Rich progress tracking with spinners
 - Colorized output (green ✓ / red ✗)
 - Summary table of created schema
-- Error reporting with details
+- **AI System Validation**: Validates AI agent compatibility
+- Error reporting with AI context
 - Loads DATABASE_URL from root `.env`
 
-**Requirements:**
-- psql command-line tool installed
-- DATABASE_URL in root `.env` file
-- Python 3.12+
-
-### `sync_models.py` - Model Sync Script
-
-**Purpose:** Copy `models.py` to both orchestrator applications.
-
-**Why:**
-- Maintains single source of truth
-- Prevents model drift between apps
-- Simplifies updates (change once, sync everywhere)
-
-**When to Run:**
-- After modifying any Pydantic model in `models.py`
-- After adding new models
-- After changing field types or validators
-
-## 🗄️ Database Schema
+## 🗄️ Database Schema for AI Agents
 
 ### Tables
 
-| Table                | Purpose                           | Key Relationships   |
-| -------------------- | --------------------------------- | ------------------- |
-| `orchestrator_agents`| Singleton orchestrator agent      | None                |
-| `agents`             | Managed agent registry            | None                |
-| `prompts`            | Prompt history                    | FK → agents         |
-| `agent_logs`         | Event logs (hooks + responses)    | FK → agents         |
-| `system_logs`        | Application logs                  | Nullable FK → agents|
+| Table                | AI Agent Purpose                           | Key Relationships   |
+| -------------------- | ----------------------------------------- | ------------------- |
+| `orchestrator_agents`| Master orchestrator agent management       | None                |
+| `agents`             | Specialized agent registry with AI context | None                |
+| `prompts`            | AI agent prompt history and metadata       | FK → agents         |
+| `agent_logs`         | AI agent event logs (hooks + responses)   | FK → agents         |
+| `system_logs`        | Application logs for AI debugging         | Nullable FK → agents|
 
-### Indexes
+### AI-Optimized Indexes
 
-36 total indexes for query performance:
-- Status indexes for filtering active agents
-- Timestamp indexes for chronological queries
-- Foreign key indexes for join performance
-- Partial indexes for nullable columns
+36 total indexes optimized for AI agent workflows:
+- **Agent Status Indexes**: Fast filtering of active/executing agents
+- **Temporal Indexes**: Efficient chronological queries for agent history
+- **Task-based Indexes**: Quick retrieval of events by task_slug
+- **Metadata Indexes**: JSONB field indexing for AI context queries
+- **Foreign Key Indexes**: Optimized agent relationship queries
 
-### Triggers
+### AI Event Structure
 
-Auto-update `updated_at` timestamps:
-- `orchestrator_agents` - Updates on any row change
-- `agents` - Updates on any row change
-
-## 🔧 Common Tasks
-
-### Modify a Table
-
-1. Edit the appropriate migration file in `migrations/`
-2. If adding columns, use `ALTER TABLE ADD COLUMN IF NOT EXISTS`
-3. Run migrations: `uv run apps/orchestrator_db/run_migrations.py`
-
-**IMPORTANT: Never use `DROP TABLE` in migration files!**
-- Migration files must be idempotent and non-destructive
-- Use `CREATE TABLE IF NOT EXISTS` instead
-- To drop tables, use the dedicated `drop_table.py` utility (see below)
-
-### Add a New Table
-
-1. Create `8_new_table.sql` in `migrations/`
-2. Use `CREATE TABLE IF NOT EXISTS`
-3. Consider dependencies (foreign keys)
-4. Update `run_migrations.py` MIGRATIONS list
-5. Run migrations
-
-### Update Pydantic Models
-
-1. Edit `models.py`
-2. Add/modify model classes
-3. Sync to apps: `python apps/orchestrator_db/sync_models.py`
-4. Update database schema if needed
-
-### Drop Individual Tables (Development Only)
-
-**⚠️ WARNING: This destroys table data!**
-
-Use the dedicated drop utility with explicit table flags:
-
-```bash
-# Drop a specific table
-uv run apps/orchestrator_db/drop_table.py --table orchestrator_chat
-
-# Drop multiple tables
-uv run apps/orchestrator_db/drop_table.py --table prompts --table agent_logs
-
-# List available tables
-uv run apps/orchestrator_db/drop_table.py --list
-```
-
-Available tables:
-- `orchestrator_agents`
-- `agents`
-- `prompts`
-- `agent_logs`
-- `system_logs`
-- `orchestrator_chat`
-
-After dropping tables, recreate them:
-```bash
-uv run apps/orchestrator_db/run_migrations.py
-```
-
-### Reset Database (Development Only)
-
-**⚠️ WARNING: This destroys all data!**
+The schema supports sophisticated AI agent event tracking:
 
 ```sql
-DROP SCHEMA public CASCADE;
-CREATE SCHEMA public;
+-- Agent logs support structured AI events
+CREATE TABLE agent_logs (
+    id UUID PRIMARY KEY,
+    agent_id UUID REFERENCES agents(id),
+    task_slug TEXT,                    -- AI workflow grouping
+    entry_index INTEGER,               -- Event sequence
+    event_category TEXT,               -- 'request', 'response'
+    event_type TEXT,                   -- 'TextBlock', 'ToolUseBlock', 'ThinkingBlock'
+    content TEXT,                      -- Event content
+    payload JSONB,                     -- AI-specific metadata
+    created_at TIMESTAMP DEFAULT NOW()
+);
 ```
 
-Then run migrations:
-```bash
-uv run apps/orchestrator_db/run_migrations.py
+## 🔧 AI Agent Development Tasks
+
+### Add New Agent-Specific Tables
+
+1. Create `8_ai_feature.sql` in `migrations/`
+2. Use `CREATE TABLE IF NOT EXISTS` with AI-specific fields
+3. Include JSONB metadata columns for flexibility
+4. Add indexes for AI agent query patterns
+5. Update `run_migrations.py` MIGRATIONS list
+6. Run migrations
+
+### Extend Models for AI Features
+
+1. Edit `models.py` with new Pydantic models
+2. Include AI metadata fields (JSON, optional types)
+3. Add validation for AI-specific data structures
+4. Sync to apps: `python apps/orchestrator_db/sync_models.py`
+
+### Query Patterns for AI Agents
+
+```python
+# Efficient AI agent queries
+async def get_agent_workflow_history(agent_id: uuid.UUID, task_slug: str):
+    """Get all events for an AI agent workflow"""
+    return await fetch(
+        """
+        SELECT * FROM agent_logs 
+        WHERE agent_id = $1 AND task_slug = $2
+        ORDER BY entry_index ASC
+        """,
+        agent_id, task_slug
+    )
+
+async def get_active_ai_agents():
+    """Get currently executing AI agents"""
+    return await fetch(
+        """
+        SELECT * FROM agents 
+        WHERE status = 'executing'
+        ORDER BY created_at DESC
+        """
+    )
 ```
+
+## 🤖 AI Agent Integration Guide
+
+### For AI Agents Using This Database
+
+#### 1. Agent Lifecycle Management
+```python
+# Create new specialized agent
+agent_id = await create_agent(
+    orchestrator_agent_id=orchestrator_uuid,
+    name="ai-specialist",
+    model="claude-sonnet-4-5-20250929",
+    system_prompt="You are an AI specialist for...",
+    metadata={
+        "template_name": "ai-specialist",
+        "ai_capabilities": ["analysis", "optimization"]
+    }
+)
+```
+
+#### 2. Event Logging
+```python
+# Log AI agent events with context
+await insert_agent_log(
+    agent_id=agent_uuid,
+    task_slug="ai-analysis",
+    entry_index=0,
+    event_category="request",
+    event_type="UserPromptSubmit",
+    content="Analyze this data for patterns",
+    payload={
+        "ai_model": "claude-sonnet-4-5-20250929",
+        "context_tokens": 1500,
+        "tools_available": ["Read", "Write", "Analyze"]
+    }
+)
+```
+
+#### 3. Performance Monitoring
+```python
+# Track AI agent performance
+await update_agent_costs(
+    agent_id=agent_uuid,
+    input_tokens=1200,
+    output_tokens=800,
+    cost_usd=0.0156
+)
+```
+
+### Best Practices for AI Agents
+
+1. **Use Task Slugs**: Group related events with meaningful task_slug values
+2. **Rich Metadata**: Include AI context in JSONB metadata fields
+3. **Event Sequencing**: Use entry_index for proper event ordering
+4. **Status Updates**: Keep agent status current for orchestration
+5. **Cost Tracking**: Monitor token usage for budget optimization
 
 ## 📚 Related Documentation
 
 - **Migration System:** `migrations/README.md` - Detailed migration docs
+- **Multi-Agent System:** `../orchestrator_3_stream/README.md` - AI orchestration guide
 - **Main README:** `../../README.md` - Project overview
-- **Database Schema Spec:** `../../specs/cli-orch-db-structures.md` - Original design
+- **AI Development:** `../../specs/` - AI development specifications
 
-## 🤝 Contributing
+## 🤝 Contributing to AI-Native Database
 
-### Guidelines
+### AI-Focused Guidelines
 
-1. **Never modify models directly in apps** - Always update `models.py` and sync
-2. **Use idempotent SQL** - All migrations should use `IF NOT EXISTS`
-3. **Test migrations** - Always test on development DB first
-4. **Document changes** - Update READMEs when adding features
-5. **Follow naming** - Use numbered migration files (0-9)
+1. **AI-First Design**: Always consider AI agent workflows in schema changes
+2. **Metadata Support**: Include JSONB fields for flexible AI context storage
+3. **Performance for AI**: Optimize indexes for AI agent query patterns
+4. **Event Structure**: Support structured AI event logging
+5. **Agent Lifecycle**: Consider full agent lifecycle in table design
 
-### Workflow
+### AI Development Workflow
 
 ```bash
-# 1. Make changes to models.py
+# 1. Design AI schema changes
+vim apps/orchestrator_db/migrations/8_ai_feature.sql
+
+# 2. Update AI models
 vim apps/orchestrator_db/models.py
 
-# 2. Sync to apps
+# 3. Sync to AI apps
 python apps/orchestrator_db/sync_models.py
-
-# 3. Update migrations if schema changed
-vim apps/orchestrator_db/migrations/X_table.sql
 
 # 4. Apply migrations
 uv run apps/orchestrator_db/run_migrations.py
 
-# 5. Test in app
-cd apps/orchestrator_1_term
-uv run pytest tests/
+# 5. Test with AI agents
+cd apps/orchestrator_3_stream
+# Test AI workflows with new schema
 ```
 
-## 🚨 Troubleshooting
+## 🚨 AI-Specific Troubleshooting
 
-### "relation does not exist"
+### "Agent events not appearing"
 
-**Cause:** Database tables not created yet.
+**Cause:** Agent not properly logging events or metadata issues.
+
+**Solution:**
+```python
+# Check agent logs
+logs = await get_agent_logs(agent_id=agent_uuid, limit=10)
+
+# Verify event structure
+for log in logs:
+    print(f"Event: {log.event_type}, Category: {log.event_category}")
+```
+
+### "High query latency for agent workflows"
+
+**Cause:** Missing AI-optimized indexes.
 
 **Solution:**
 ```bash
-uv run apps/orchestrator_db/run_migrations.py
+# Check if AI-specific indexes exist
+psql $DATABASE_URL -c "\d agents"
+psql $DATABASE_URL -c "\d agent_logs"
+
+# Add AI workflow indexes if missing
 ```
 
-### "DATABASE_URL not found"
+### "Agent metadata not persisting"
 
-**Cause:** Environment variable not set.
+**Cause:** JSONB field issues or model sync problems.
 
 **Solution:**
 ```bash
-# Copy sample .env
-cp .env.sample .env
-
-# Edit and add your DATABASE_URL
-vim .env
-```
-
-### Models out of sync between apps
-
-**Cause:** Forgot to run sync script after updating models.
-
-**Solution:**
-```bash
+# Sync models to ensure latest AI metadata fields
 python apps/orchestrator_db/sync_models.py
+
+# Test metadata handling
+agent = Agent(metadata={"ai_context": {"version": "1.0"}})
 ```
 
-### Migration fails
+## 📊 AI Agent Statistics
 
-**Cause:** Various reasons (syntax error, constraint violation, etc.)
-
-**Solution:**
-1. Check migration output for specific error
-2. Review SQL syntax in migration file
-3. Check PostgreSQL logs
-4. Verify data doesn't violate new constraints
-
-## 📊 Statistics
-
-- **5 Tables** - orchestrator_agents, agents, prompts, agent_logs, system_logs
-- **36 Indexes** - Optimized for common query patterns
-- **2 Triggers** - Auto-update timestamps
-- **8 Migrations** - Ordered, idempotent schema setup
-- **5 Models** - Type-safe Pydantic classes
+- **5 Tables** - Optimized for AI agent workflows
+- **36 Indexes** - AI agent query performance optimization
+- **2 Triggers** - Auto-update timestamps for agent tracking
+- **8 Migrations** - AI-aware schema evolution
+- **5 Models** - Type-safe AI agent data structures
 
 ---
 
-**Last Updated:** 2025-10-22
-**Maintainer:** Agentic Engineer Team
+**Last Updated:** 2025-11-20 (Enhanced for AI Agent Integration)
+**Maintainer:** AI-Native Development Team
+**AI Optimization**: Full multi-agent orchestration support

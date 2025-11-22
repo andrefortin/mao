@@ -8,7 +8,6 @@ Implements 8 management tools for the orchestrator agent.
 import threading
 import asyncio
 import uuid
-import os
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
 from pathlib import Path
@@ -57,7 +56,7 @@ from .command_agent_hooks import (
 )
 from .websocket_manager import WebSocketManager
 from .logger import OrchestratorLogger
-from . import config
+from . import config, llm_settings
 from .file_tracker import FileTracker
 from .subagent_loader import SubagentRegistry
 
@@ -115,7 +114,7 @@ class AgentManager:
 
         @tool(
             "create_agent",
-            "Create a new agent. REQUIRED: name. OPTIONAL: system_prompt (can be empty if using template), model, subagent_template. Use 'fast' for haiku model. If subagent_template is provided, the template's system prompt, tools, and model will be applied automatically.",
+            "Create a new agent. REQUIRED: name. OPTIONAL: system_prompt (can be empty if using template), model, subagent_template. Use 'fast' for the Z.AI Haiku/Air model. If subagent_template is provided, the template's system prompt, tools, and model will be applied automatically.",
             {"name": str, "system_prompt": str, "model": str, "subagent_template": str},
         )
         async def create_agent_tool(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -123,22 +122,11 @@ class AgentManager:
             try:
                 name = args.get("name")
                 system_prompt = args.get("system_prompt", "")
-                model_input = args.get("model", config.DEFAULT_AGENT_MODEL)
+                model_input = args.get("model") or llm_settings.get_default_agent_model()
                 subagent_template = args.get("subagent_template")
 
-                # Model alias mapping
-                model_aliases = {
-                    "sonnet": "claude-sonnet-4-5-20250929",
-                    "haiku": "claude-haiku-4-5-20251001",
-                    "fast": "claude-haiku-4-5-20251001",  # Alias for haiku
-                }
-
                 # Resolve model alias or use as-is
-                model = (
-                    model_aliases.get(model_input.lower(), model_input)
-                    if isinstance(model_input, str)
-                    else model_input
-                )
+                model = config.resolve_model_alias(model_input)
 
                 # Validate required fields
                 if not name:
@@ -710,14 +698,12 @@ class AgentManager:
 
             default_disallowed = ["NotebookEdit", "ExitPlanMode"]
 
-            # Pass ANTHROPIC_API_KEY explicitly to ensure subprocess has access
-            env_vars = {}
-            if "ANTHROPIC_API_KEY" in os.environ:
-                env_vars["ANTHROPIC_API_KEY"] = os.environ["ANTHROPIC_API_KEY"]
+            # Pass LLM credentials to ensure subprocess has access (Z.AI, Anthropic, OpenRouter)
+            env_vars = llm_settings.build_runtime_env()
 
             options = ClaudeAgentOptions(
                 system_prompt=system_prompt,
-                model=model or config.DEFAULT_AGENT_MODEL,
+                model=model or llm_settings.get_default_agent_model(),
                 cwd=self.working_dir,
                 hooks=hooks_dict,
                 allowed_tools=tools_to_use,
@@ -742,7 +728,7 @@ class AgentManager:
                 {
                     "id": str(agent_id),
                     "name": name,
-                    "model": model or config.DEFAULT_AGENT_MODEL,
+                    "model": model or llm_settings.get_default_agent_model(),
                     "status": "idle",
                 }
             )
@@ -826,15 +812,13 @@ class AgentManager:
 
             default_disallowed = ["NotebookEdit", "ExitPlanMode"]
 
-            # Pass ANTHROPIC_API_KEY explicitly to ensure subprocess has access
-            env_vars = {}
-            if "ANTHROPIC_API_KEY" in os.environ:
-                env_vars["ANTHROPIC_API_KEY"] = os.environ["ANTHROPIC_API_KEY"]
+            # Pass LLM credentials to ensure subprocess has access (Z.AI, Anthropic, OpenRouter)
+            env_vars = llm_settings.build_runtime_env()
 
             # Build options with session resume (use Pydantic model properties)
             options = ClaudeAgentOptions(
                 system_prompt=agent.system_prompt,
-                model=agent.model,
+                model=agent.model or llm_settings.get_default_agent_model(),
                 cwd=agent.working_dir,
                 resume=agent.session_id,
                 hooks=hooks_dict,

@@ -72,6 +72,35 @@ export interface GetOrchestratorResponse {
   orchestrator_tools: string[]  // Tool signatures in TypeScript format
 }
 
+// LLM Provider metadata
+export interface LlmProviderOption {
+  id: string
+  label: string
+  description: string
+  icon: string
+  tags: string[]
+  default_model: string
+  fast_model: string
+  available_models: string[]
+  docs_url?: string | null
+  is_ready: boolean
+  missing_keys: string[]
+}
+
+export interface LlmProviderState {
+  provider_id: string
+  provider_label: string
+  orchestrator_model: string
+  default_agent_model: string
+  fast_model: string
+  updated_at: string
+}
+
+export interface GetLlmProvidersResponse {
+  active: LlmProviderState
+  providers: LlmProviderOption[]
+}
+
 // ═══════════════════════════════════════════════════════════
 // AGENT TYPE
 // ═══════════════════════════════════════════════════════════

@@ -22,7 +22,7 @@ from rich.table import Table
 from rich.console import Console
 
 # Import our custom modules
-from modules import config
+from modules import config, llm_settings
 from modules.logger import get_logger
 from modules.websocket_manager import get_websocket_manager
 from modules import database
@@ -40,6 +40,8 @@ from modules.config_models import (
     ServerDefinition, AuthMethod, ServerEnvironment, SyncOperation, SyncBatch,
     ConfigFile, CreateServerRequest, SyncOperationRequest, SyncBatchRequest
 )
+# Import OpenRouter routes
+from openrouter_routes import router as openrouter_router
 
 logger = get_logger()
 ws_manager = get_websocket_manager()
@@ -137,8 +139,18 @@ async def lifespan(app: FastAPI):
         # Parse to Pydantic model
         orchestrator = OrchestratorAgent(**orchestrator_data)
         logger.success(f"✅ New orchestrator created: {orchestrator.id}")
-        logger.info(f"  Session ID: {orchestrator.session_id or 'Not set yet (will be set after first interaction)'}")
+        logger.info(
+            f"  Session ID: {orchestrator.session_id or 'Not set yet (will be set after first interaction)'}"
+        )
         logger.info(f"  Status: {orchestrator.status}")
+
+    # Initialize provider runtime (allows UI to switch providers dynamically)
+    runtime_settings = llm_settings.initialize_runtime(orchestrator.metadata)
+    app.state.llm_settings = runtime_settings
+    logger.info(
+        f"LLM provider initialized: {runtime_settings.provider_label} "
+        f"(default={runtime_settings.default_agent_model}, fast={runtime_settings.fast_model})"
+    )
 
     # Initialize agent manager (scoped to this orchestrator)
     logger.info("Initializing agent manager...")
@@ -193,6 +205,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Include OpenRouter routes
+app.include_router(openrouter_router, prefix="/api/openrouter", tags=["OpenRouter"])
 
 # ═══════════════════════════════════════════════════════════
 # REQUEST/RESPONSE MODELS
@@ -211,6 +225,15 @@ class SendChatRequest(BaseModel):
 
     message: str
     orchestrator_agent_id: str
+
+
+class ProviderSelectionRequest(BaseModel):
+    """Request body for selecting an LLM provider"""
+
+    provider_id: str
+    orchestrator_model: Optional[str] = None
+    default_agent_model: Optional[str] = None
+    fast_model: Optional[str] = None
 
 
 # ═══════════════════════════════════════════════════════════
@@ -314,6 +337,69 @@ async def get_headers():
         return {"status": "success", "cwd": cwd}
     except Exception as e:
         logger.error(f"Failed to get headers: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/llm/providers")
+async def list_llm_providers():
+    """Expose active provider + catalog for the frontend switcher."""
+    try:
+        logger.http_request("GET", "/api/llm/providers")
+        response = {
+            "active": llm_settings.serialize_runtime(),
+            "providers": llm_settings.list_providers(),
+        }
+        logger.http_request("GET", "/api/llm/providers", 200)
+        return response
+    except Exception as e:
+        logger.error(f"Failed to list LLM providers: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/llm/providers/select")
+async def select_llm_provider(request: ProviderSelectionRequest):
+    """Persist provider selection and broadcast to live clients."""
+    try:
+        logger.http_request("POST", "/api/llm/providers/select")
+
+        orchestrator = app.state.orchestrator
+        runtime = llm_settings.apply_provider_selection(
+            provider_id=request.provider_id,
+            orchestrator_model=request.orchestrator_model,
+            default_agent_model=request.default_agent_model,
+            fast_model=request.fast_model,
+        )
+        app.state.llm_settings = runtime
+
+        # Persist on orchestrator metadata
+        await database.update_orchestrator_metadata(
+            orchestrator.id,
+            {"llm_provider": runtime.to_metadata()},
+        )
+        orchestrator.metadata = orchestrator.metadata or {}
+        orchestrator.metadata["llm_provider"] = runtime.to_metadata()
+
+        logger.success(
+            f"LLM provider set to {runtime.provider_label} "
+            f"(orchestrator={runtime.orchestrator_model}, fast={runtime.fast_model})"
+        )
+
+        # Broadcast live update so UIs stay in sync
+        await ws_manager.broadcast_orchestrator_updated(
+            {
+                "id": str(orchestrator.id),
+                "metadata": orchestrator.metadata,
+                "provider": runtime.public_dict(),
+            }
+        )
+
+        logger.http_request("POST", "/api/llm/providers/select", 200)
+        return {"active": runtime.public_dict()}
+    except ValueError as e:
+        logger.error(f"Invalid provider selection: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to update provider: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

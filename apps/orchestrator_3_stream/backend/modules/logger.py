@@ -12,10 +12,14 @@ from rich.panel import Panel
 from rich.logging import RichHandler
 from rich.text import Text
 import sys
+from typing import Optional
 
 # Create logs directory
 LOGS_DIR = Path(__file__).parent.parent / "logs"
 LOGS_DIR.mkdir(exist_ok=True)
+
+# Default Claude CLI debug directory (created when CLAUDE_HTTP_TRACE=1)
+CLAUDE_DEBUG_DIR = Path.home() / ".claude" / "debug"
 
 # Rich console for formatted output
 console = Console()
@@ -171,6 +175,60 @@ class OrchestratorLogger:
     def shutdown(self):
         """Log shutdown"""
         self.section("👋 ORCHESTRATOR BACKEND SHUTTING DOWN", "bold yellow")
+
+    def claude_trace_hint(self, session_id: Optional[str] = None) -> Optional[Path]:
+        """
+        Log where to find Claude CLI HTTP trace files when CLAUDE_HTTP_TRACE=1 is enabled.
+
+        Args:
+            session_id: Optional SDK session_id to find an exact trace file.
+
+        Returns:
+            Path to the discovered trace file, or None if not found.
+        """
+        if not CLAUDE_DEBUG_DIR.exists():
+            self.warning(
+                f"Claude debug directory not found at {CLAUDE_DEBUG_DIR}. "
+                "Enable CLAUDE_HTTP_TRACE=1 to capture HTTP traces."
+            )
+            return None
+
+        if session_id:
+            session_file = CLAUDE_DEBUG_DIR / f"{session_id}.txt"
+            if session_file.exists():
+                self.info(
+                    f"📄 Claude CLI trace for session {session_id}: {session_file}"
+                )
+                return session_file
+            else:
+                self.warning(
+                    f"No Claude CLI trace found for session {session_id} "
+                    f"(looked for {session_file.name}). Falling back to latest."
+                )
+
+        latest_link = CLAUDE_DEBUG_DIR / "latest"
+        if latest_link.exists():
+            try:
+                resolved = latest_link.resolve()
+            except OSError:
+                resolved = latest_link
+            self.info(f"📄 Latest Claude CLI trace: {resolved}")
+            return resolved
+
+        latest_file = max(
+            CLAUDE_DEBUG_DIR.glob("*.txt"),
+            default=None,
+            key=lambda p: p.stat().st_mtime,
+        )
+        if latest_file:
+            self.info(f"📄 Latest Claude CLI trace: {latest_file}")
+            return latest_file
+
+        self.warning(
+            f"No Claude CLI trace files found in {CLAUDE_DEBUG_DIR}. "
+            "Ensure CLAUDE_HTTP_TRACE=1 is set before running requests."
+        )
+        return None
 
 
 # Global logger instance

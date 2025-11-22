@@ -10,6 +10,7 @@ dependencies = [
     "python-multipart",
     "asyncpg",
     "claude-agent-sdk",
+    "openai>=1.12.0",
     "rich",
     "pydantic",
     "python-dotenv",
@@ -17,6 +18,7 @@ dependencies = [
     "boto3",
     "toml",
     "paramiko",
+    "httpx",
 ]
 
 [tool.uv]

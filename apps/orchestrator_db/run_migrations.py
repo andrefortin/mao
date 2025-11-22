@@ -60,6 +60,7 @@ MIGRATIONS = [
     "14_sync_operation_logs.sql",
     "15_server_backups.sql",
     "16_environment_sync_configs.sql",
+    "17_openrouter_provider_configs.sql",
 ]
 
 def main():
@@ -187,6 +188,8 @@ def main():
         table.add_row("config_files", "Configuration file management")
         table.add_row("sync_operation_logs", "Detailed operation logging")
         table.add_row("server_backups", "Backup tracking and management")
+        table.add_row("llm_provider_configs", "LLM provider configurations and settings")
+        table.add_row("openrouter_models", "OpenRouter model specifications and pricing")
         table.add_row("indexes", "Performance indexes")
         table.add_row("functions", "Trigger functions")
         table.add_row("triggers", "Auto-update triggers")

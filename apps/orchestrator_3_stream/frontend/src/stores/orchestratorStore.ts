@@ -18,10 +18,13 @@ import type {
   LogLevel,
   ChatMessage,
   AppStats,
-  EventStreamFilter
+  EventStreamFilter,
+  LlmProviderOption,
+  LlmProviderState
 } from '../types'
 import * as chatService from '../services/chatService'
 import * as agentService from '../services/agentService'
+import * as providerService from '../services/providerService'
 import { getEvents } from '../services/eventService'
 import { DEFAULT_EVENT_HISTORY_LIMIT } from '../config/constants'
 import { useAgentPulse } from '../composables/useAgentPulse'
@@ -66,6 +69,13 @@ export const useOrchestratorStore = defineStore('orchestrator', () => {
   // WebSocket
   const isConnected = ref(false)
   let wsConnection: WebSocket | null = null
+
+  // LLM Provider state
+  const llmProviders = ref<LlmProviderOption[]>([])
+  const activeLlmProvider = ref<LlmProviderState | null>(null)
+  const llmProviderLoading = ref(false)
+  const llmProviderError = ref<string | null>(null)
+  const isSwitchingProvider = ref(false)
 
   // ═══════════════════════════════════════════════════════════
   // GETTERS
@@ -466,10 +476,19 @@ export const useOrchestratorStore = defineStore('orchestrator', () => {
         input_tokens: orchestratorData.input_tokens ?? orchestratorAgent.value.input_tokens,
         output_tokens: orchestratorData.output_tokens ?? orchestratorAgent.value.output_tokens,
         total_cost: orchestratorData.total_cost ?? orchestratorAgent.value.total_cost,
-        updated_at: orchestratorData.updated_at ?? orchestratorAgent.value.updated_at
+        updated_at: orchestratorData.updated_at ?? orchestratorAgent.value.updated_at,
+        metadata: orchestratorData.metadata ?? orchestratorAgent.value.metadata
       }
 
       console.log(`✅ Updated orchestrator cost: $${orchestratorData.total_cost?.toFixed(4)} | Tokens: ${orchestratorData.input_tokens + orchestratorData.output_tokens}`)
+
+      if (orchestratorData.metadata) {
+        applyProviderMetadata(orchestratorData.metadata)
+      }
+    }
+
+    if (message.provider) {
+      activeLlmProvider.value = message.provider
     }
   }
 
@@ -884,6 +903,76 @@ export const useOrchestratorStore = defineStore('orchestrator', () => {
     return tokens ? Number(tokens) : undefined
   }
 
+  function applyProviderMetadata(metadata?: Record<string, any>) {
+    if (!metadata) return
+    const providerMeta = metadata.llm_provider
+    if (!providerMeta) return
+
+    activeLlmProvider.value = {
+      provider_id: providerMeta.provider_id,
+      provider_label: providerMeta.provider_label ?? providerMeta.provider_id,
+      orchestrator_model: providerMeta.orchestrator_model ?? providerMeta.default_agent_model ?? '',
+      default_agent_model: providerMeta.default_agent_model ?? providerMeta.orchestrator_model ?? '',
+      fast_model: providerMeta.fast_model ?? providerMeta.default_agent_model ?? '',
+      updated_at: providerMeta.updated_at ?? new Date().toISOString()
+    }
+  }
+
+  async function loadLlmProviders(force = false) {
+    if (!force && llmProviders.value.length > 0) {
+      return
+    }
+
+    llmProviderLoading.value = true
+    llmProviderError.value = null
+    try {
+      const response = await providerService.fetchLlmProviders()
+      llmProviders.value = response.providers
+      activeLlmProvider.value = response.active
+    } catch (error) {
+      console.error('Failed to load LLM providers:', error)
+      llmProviderError.value = 'Failed to load provider catalog'
+    } finally {
+      llmProviderLoading.value = false
+    }
+  }
+
+  async function selectLlmProvider(
+    providerId: string,
+    overrides?: {
+      orchestrator_model?: string
+      default_agent_model?: string
+      fast_model?: string
+    }
+  ) {
+    if (!providerId || isSwitchingProvider.value) return
+    isSwitchingProvider.value = true
+    try {
+      const response = await providerService.selectLlmProvider({
+        provider_id: providerId,
+        ...overrides
+      })
+      activeLlmProvider.value = response.active
+
+      if (orchestratorAgent.value) {
+        orchestratorAgent.value = {
+          ...orchestratorAgent.value,
+          metadata: {
+            ...(orchestratorAgent.value.metadata || {}),
+            llm_provider: response.active
+          }
+        }
+      }
+
+      await loadLlmProviders(true)
+    } catch (error) {
+      console.error('Failed to switch LLM provider:', error)
+      throw error
+    } finally {
+      isSwitchingProvider.value = false
+    }
+  }
+
   // ═══════════════════════════════════════════════════════════
   // INITIALIZATION
   // ═══════════════════════════════════════════════════════════
@@ -899,11 +988,19 @@ export const useOrchestratorStore = defineStore('orchestrator', () => {
       const response = await chatService.getOrchestratorInfo()
       orchestratorAgentId.value = response.orchestrator.id
       orchestratorAgent.value = response.orchestrator
+      applyProviderMetadata(response.orchestrator.metadata)
       console.log('Orchestrator info loaded:', orchestratorAgentId.value, 'Cost:', response.orchestrator.total_cost)
     } catch (error) {
       console.error('Failed to load orchestrator info:', error)
       // Fall back to a safe default behavior
       return
+    }
+
+    // Load provider catalog (non-blocking if it fails)
+    try {
+      await loadLlmProviders(true)
+    } catch (error) {
+      console.error('Failed to load LLM providers:', error)
     }
 
     // Connect WebSocket
@@ -953,6 +1050,11 @@ export const useOrchestratorStore = defineStore('orchestrator', () => {
     isTyping,
     isConnected,
     commandInputVisible,
+    llmProviders,
+    activeLlmProvider,
+    llmProviderLoading,
+    llmProviderError,
+    isSwitchingProvider,
 
     // Getters
     activeAgents,
@@ -978,6 +1080,8 @@ export const useOrchestratorStore = defineStore('orchestrator', () => {
     showCommandInput,
     hideCommandInput,
     exportEventStream,
+    loadLlmProviders,
+    selectLlmProvider,
     addChatMessage,
     sendUserMessage,
     clearChat,

@@ -8,7 +8,7 @@ Uses classic Python logging (not Rich) for configuration loading
 from pathlib import Path
 import os
 import logging
-from typing import List
+from typing import List, Dict, Optional
 from dotenv import load_dotenv
 
 # Set up classic Python logging for config loading
@@ -83,16 +83,63 @@ CORS_ORIGINS = os.getenv(
 ).split(",")
 
 # ============================================================================
-# AGENT CONFIGURATION
+# LLM PROVIDER CONFIGURATION
 # ============================================================================
 
-# Default model for agents
-DEFAULT_MODEL = "claude-sonnet-4-5-20250929"
+DEFAULT_SONNET_MODEL = os.getenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "glm-4.5")
+DEFAULT_HAIKU_MODEL = os.getenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "glm-4.5-air")
+DEFAULT_OPUS_MODEL = os.getenv("ANTHROPIC_DEFAULT_OPUS_MODEL", "glm-4.5")
 
-FAST_MODEL = "claude-haiku-4-5-20251001"
+MODEL_ALIASES = {
+    "sonnet": DEFAULT_SONNET_MODEL,
+    "haiku": DEFAULT_HAIKU_MODEL,
+    "opus": DEFAULT_OPUS_MODEL,
+    "fast": DEFAULT_HAIKU_MODEL,
+    "default": DEFAULT_SONNET_MODEL,
+}
 
-# Available models
-AVAILABLE_MODELS = ["claude-sonnet-4-5-20250929", "claude-haiku-4-5-20251001"]
+LLM_ENV_KEYS = [
+    # Anthropic & compatible endpoints
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_CUSTOM_HEADERS",
+    "API_TIMEOUT_MS",
+    # Z.AI specific overrides
+    "ZAI_ANTHROPIC_AUTH_TOKEN",
+    "ZAI_ANTHROPIC_BASE_URL",
+    # OpenRouter / Grok overrides
+    "OPENROUTER_API_KEY",
+    "OPENROUTER_BASE_URL",
+    "OPENROUTER_SITE_URL",
+    "OPENROUTER_SITE_NAME",
+]
+
+# Default provider selection (used by llm_settings to bootstrap runtime state)
+DEFAULT_LLM_PROVIDER = os.getenv("LLM_PROVIDER", "zai").lower()
+
+
+def resolve_model_alias(model_name: Optional[str]) -> Optional[str]:
+    """
+    Resolve friendly aliases (haiku/sonnet/fast) to actual provider model IDs.
+
+    Args:
+        model_name: Alias or fully qualified model string
+
+    Returns:
+        Resolved model string or original value if no alias match
+    """
+    if not isinstance(model_name, str):
+        return model_name
+    return MODEL_ALIASES.get(model_name.lower(), model_name)
+
+
+DEFAULT_MODEL = resolve_model_alias(os.getenv("DEFAULT_MODEL", DEFAULT_SONNET_MODEL))
+FAST_MODEL = resolve_model_alias(os.getenv("FAST_MODEL", DEFAULT_HAIKU_MODEL))
+MODEL_ALIASES["fast"] = FAST_MODEL
+MODEL_ALIASES["default"] = DEFAULT_MODEL
+
+AVAILABLE_MODELS = sorted(set(MODEL_ALIASES.values()) | {DEFAULT_MODEL, FAST_MODEL})
 
 # ============================================================================
 # ORCHESTRATOR CONFIGURATION
@@ -138,12 +185,30 @@ def get_working_dir() -> str:
     return _current_working_dir
 
 
+def build_llm_env() -> Dict[str, str]:
+    """
+    Build the environment variables required by the Claude/Z.AI SDK subprocesses.
+
+    Returns:
+        Dict containing available LLM-related env vars (legacy Anthropic + Z.AI)
+    """
+    env: Dict[str, str] = {}
+    for key in LLM_ENV_KEYS:
+        if key in os.environ:
+            env[key] = os.environ[key]
+    if "ANTHROPIC_API_KEY" not in env and "ANTHROPIC_AUTH_TOKEN" in env:
+        # Some downstream tools still expect ANTHROPIC_API_KEY even when using Z.AI.
+        env["ANTHROPIC_API_KEY"] = env["ANTHROPIC_AUTH_TOKEN"]
+    return env
+
 # ============================================================================
 # AGENT CONFIGURATION
 # ============================================================================
 
 # Default model for managed agents
-DEFAULT_AGENT_MODEL = os.getenv("DEFAULT_AGENT_MODEL", DEFAULT_MODEL)
+DEFAULT_AGENT_MODEL = resolve_model_alias(
+    os.getenv("DEFAULT_AGENT_MODEL", DEFAULT_MODEL)
+)
 
 # Agent system prompt template path
 AGENT_SYSTEM_PROMPT_TEMPLATE_PATH = os.getenv(
@@ -194,4 +259,8 @@ config_logger.info(
 config_logger.info(f"Log Level:       {LOG_LEVEL}")
 config_logger.info(f"Log Directory:   {LOG_DIR}")
 config_logger.info(f"CORS Origins:    {', '.join(CORS_ORIGINS)}")
+config_logger.info(f"Default Model:   {DEFAULT_MODEL}")
+config_logger.info(f"Fast Model:      {FAST_MODEL}")
+config_logger.info(f"Available Models:{', '.join(AVAILABLE_MODELS)}")
+config_logger.info(f"LLM Provider:    {DEFAULT_LLM_PROVIDER}")
 config_logger.info("=" * 70)

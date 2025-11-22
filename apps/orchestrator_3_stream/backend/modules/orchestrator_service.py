@@ -13,7 +13,6 @@ Reference: apps/orchestrator_1_term/modules/orchestrator_agent.py
 
 import uuid
 import asyncio
-import os
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 from pathlib import Path
@@ -42,7 +41,7 @@ from .single_agent_prompt import summarize_event
 # WebSocket and logging
 from .websocket_manager import WebSocketManager
 from .logger import OrchestratorLogger
-from . import config
+from . import config, llm_settings, openrouter_client
 from .subagent_loader import SubagentRegistry
 
 # Hook imports for orchestrator agent event tracking
@@ -146,6 +145,10 @@ class OrchestratorService:
             self.logger.info(f"Resuming session: {session_id}")
         self.logger.info(f"Working directory: {self.working_dir}")
 
+        # Track provider switching for cost analysis
+        self._last_provider_id = None
+        self._provider_switch_count = 0
+
     def _load_system_prompt(self) -> str:
         """
         Load orchestrator system prompt from file and inject SUBAGENT_MAP.
@@ -231,18 +234,15 @@ class OrchestratorService:
                 "Starting fresh Claude SDK session (no valid session to resume)"
             )
 
-        # Build options with management tools if available
-        # Pass ANTHROPIC_API_KEY explicitly to ensure subprocess has access
-        env_vars = {}
-        if "ANTHROPIC_API_KEY" in os.environ:
-            env_vars["ANTHROPIC_API_KEY"] = os.environ["ANTHROPIC_API_KEY"]
+        runtime_env = llm_settings.build_runtime_env()
+        orchestrator_model = llm_settings.get_orchestrator_model()
 
         options_dict = {
             "system_prompt": self._load_system_prompt(),
-            "model": config.ORCHESTRATOR_MODEL,
+            "model": orchestrator_model,
             "cwd": self.working_dir,
             "resume": resume_session,
-            "env": env_vars,  # Ensure API key is available to subprocess
+            "env": runtime_env,  # Ensure API key is available to subprocess
         }
 
         # Add hooks for event tracking if orchestrator_agent_id provided
@@ -523,6 +523,38 @@ class OrchestratorService:
                     self.logger.error(f"Failed to interrupt orchestrator: {e}")
                     # Continue anyway - the new message will be processed
 
+        runtime = llm_settings.get_runtime_settings()
+
+        # Track provider switching
+        current_provider = runtime.provider_id
+        if self._last_provider_id and self._last_provider_id != current_provider:
+            self._provider_switch_count += 1
+            self.logger.info(
+                f"🔄 Provider switched: {self._last_provider_id} → {current_provider} "
+                f"(switch #{self._provider_switch_count})"
+            )
+
+            # Broadcast provider switch event
+            await self.ws_manager.broadcast({
+                "type": "provider_switch",
+                "from_provider": self._last_provider_id,
+                "to_provider": current_provider,
+                "switch_count": self._provider_switch_count,
+                "model": runtime.orchestrator_model,
+                "timestamp": datetime.now().isoformat(),
+            })
+
+        self._last_provider_id = current_provider
+
+        # Route to appropriate provider
+        if current_provider == "openrouter":
+            return await self._process_with_openrouter(
+                orch_uuid=orch_uuid,
+                orchestrator_agent_id=orchestrator_agent_id,
+                user_message=user_message,
+                runtime=runtime,
+            )
+
         # ═══════════════════════════════════════════════════════════
         # PHASE 2: EXECUTION - Execute agent with streaming
         # ═══════════════════════════════════════════════════════════
@@ -801,10 +833,26 @@ class OrchestratorService:
         except Exception as e:
             self.logger.error(f"Orchestrator execution failed: {e}")
             await self.ws_manager.set_typing_indicator(orchestrator_agent_id, False)
-            await self.ws_manager.broadcast_error(
-                error_message="Orchestrator execution failed", details={"error": str(e)}
-            )
-            raise
+
+            # Attempt provider fallback if enabled and this isn't already a fallback
+            if not getattr(self, '_is_fallback_execution', False):
+                try:
+                    self._is_fallback_execution = True
+                    return await self.handle_provider_fallback(
+                        orch_uuid=orch_uuid,
+                        orchestrator_agent_id=orchestrator_agent_id,
+                        user_message=user_message,
+                        primary_error=e
+                    )
+                finally:
+                    self._is_fallback_execution = False
+            else:
+                # Already in fallback mode, just report the error
+                await self.ws_manager.broadcast_error(
+                    error_message="Orchestrator execution failed",
+                    details={"error": str(e), "provider": runtime.provider_id}
+                )
+                raise
 
         finally:
             # Always reset execution state when done (success or failure)
@@ -863,14 +911,309 @@ class OrchestratorService:
                     cost_usd = getattr(usage_data, "total_cost_usd", 0.0)
 
         # Log what we're about to update
+        await self._update_orchestrator_costs_entry(
+            orch_uuid, input_tokens, output_tokens, cost_usd
+        )
+
+        # Note: Each TextBlock chunk is saved individually as it streams in
+        # This allows real-time display in chat UI
+        self.logger.chat_event(
+            orchestrator_agent_id, response_text, sender="orchestrator"
+        )
+
+        # Get current runtime settings for provider info
+        runtime = llm_settings.get_runtime_settings()
+
+        return {
+            "ok": True,
+            "response": response_text.strip(),
+            "session_id": final_session_id or self.session_id,
+            "tools_used": tools_used,
+            "cost_usd": cost_usd,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "provider": runtime.provider_id,
+            "model": runtime.orchestrator_model,
+            "provider_label": runtime.provider_label,
+        }
+
+    async def _process_with_openrouter(
+        self,
+        orch_uuid: uuid.UUID,
+        orchestrator_agent_id: str,
+        user_message: str,
+        runtime: llm_settings.RuntimeSettings,
+    ) -> Dict[str, Any]:
+        """Enhanced OpenRouter execution with streaming support and cost tracking."""
+        self.logger.info(f"OpenRouter streaming execution started with model: {runtime.orchestrator_model}")
+        await self.ws_manager.set_typing_indicator(orchestrator_agent_id, True)
+
+        response_text = ""
+        tools_used = []
+        input_tokens = 0
+        output_tokens = 0
+        cost_usd = 0.0
+
+        try:
+            # Build message history
+            system_prompt = self._load_system_prompt()
+            history_records = await get_chat_history(orch_uuid, limit=20)
+            messages = self._build_openrouter_messages(
+                history_records, user_message, system_prompt
+            )
+
+            # Create cost tracking session
+            session_id = f"orchestrator-{orchestrator_agent_id}-{int(datetime.now().timestamp())}"
+            cost_session = openrouter_client.create_cost_tracking_session(
+                session_id=session_id,
+                model_id=runtime.orchestrator_model
+            )
+
+            # Start streaming completion with usage tracking
+            stream, accumulator = await openrouter_client.create_completion_stream_with_usage(
+                messages=messages,
+                model=runtime.orchestrator_model,
+                session_id=session_id
+            )
+
+            # Stream response chunks with WebSocket integration
+            chunk_buffer = ""
+            async for chunk in stream:
+                if chunk.choices and len(chunk.choices) > 0:
+                    delta = chunk.choices[0].delta
+                    if delta.content:
+                        chunk_text = delta.content
+                        response_text += chunk_text
+                        chunk_buffer += chunk_text
+
+                        # Send chunks in reasonable batches to avoid excessive WebSocket messages
+                        if len(chunk_buffer) >= 50 or chunk_text.endswith(('.', '\n', '!', '?')):
+                            # Save chunk to database
+                            try:
+                                message_id = await insert_chat_message(
+                                    orchestrator_agent_id=orch_uuid,
+                                    sender_type="orchestrator",
+                                    receiver_type="user",
+                                    message=chunk_buffer,
+                                    agent_id=None,
+                                    metadata={"type": "text_chunk", "provider": "openrouter"},
+                                )
+
+                                # Generate AI summary in background
+                                asyncio.create_task(
+                                    self._summarize_and_update_chat(message_id, chunk_buffer)
+                                )
+
+                                # Broadcast chunk to WebSocket
+                                await self.ws_manager.broadcast({
+                                    "type": "orchestrator_chat",
+                                    "message": {
+                                        "id": str(message_id),
+                                        "orchestrator_agent_id": str(orch_uuid),
+                                        "sender_type": "orchestrator",
+                                        "receiver_type": "user",
+                                        "message": chunk_buffer,
+                                        "agent_id": None,
+                                        "metadata": {"type": "text_chunk", "provider": "openrouter"},
+                                        "timestamp": datetime.now().isoformat(),
+                                    },
+                                })
+
+                                # Also broadcast to chat_stream for real-time UI updates
+                                await self.ws_manager.broadcast({
+                                    "type": "chat_stream",
+                                    "orchestrator_agent_id": orchestrator_agent_id,
+                                    "chunk": chunk_buffer,
+                                    "is_complete": False,
+                                })
+
+                                chunk_buffer = ""
+
+                            except Exception as e:
+                                self.logger.error(f"Failed to save/stream OpenRouter chunk: {e}")
+
+            # Send any remaining buffer content
+            if chunk_buffer.strip():
+                try:
+                    message_id = await insert_chat_message(
+                        orchestrator_agent_id=orch_uuid,
+                        sender_type="orchestrator",
+                        receiver_type="user",
+                        message=chunk_buffer,
+                        agent_id=None,
+                        metadata={"type": "text_chunk", "provider": "openrouter"},
+                    )
+
+                    asyncio.create_task(
+                        self._summarize_and_update_chat(message_id, chunk_buffer)
+                    )
+
+                    await self.ws_manager.broadcast({
+                        "type": "orchestrator_chat",
+                        "message": {
+                            "id": str(message_id),
+                            "orchestrator_agent_id": str(orch_uuid),
+                            "sender_type": "orchestrator",
+                            "receiver_type": "user",
+                            "message": chunk_buffer,
+                            "agent_id": None,
+                            "metadata": {"type": "text_chunk", "provider": "openrouter"},
+                            "timestamp": datetime.now().isoformat(),
+                        },
+                    })
+                except Exception as e:
+                    self.logger.error(f"Failed to save final OpenRouter chunk: {e}")
+
+            # Finalize usage data
+            usage_data = accumulator.finalize()
+            input_tokens = usage_data.input_tokens
+            output_tokens = usage_data.output_tokens
+            cost_usd = float(usage_data.total_cost_usd)
+
+            # Update cost tracking
+            await self._update_orchestrator_costs_entry(
+                orch_uuid, input_tokens, output_tokens, cost_usd
+            )
+
+            # Broadcast provider-specific cost information
+            await self.ws_manager.broadcast({
+                "type": "provider_cost_update",
+                "provider": "openrouter",
+                "model": runtime.orchestrator_model,
+                "usage": {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "total_tokens": usage_data.total_tokens,
+                    "cost_usd": cost_usd,
+                    "cached_tokens_percentage": usage_data.cached_tokens_percentage,
+                },
+                "timestamp": datetime.now().isoformat(),
+            })
+
+            # Finish cost tracking session
+            final_session = openrouter_client.finish_cost_tracking_session(session_id)
+            if final_session:
+                self.logger.info(f"OpenRouter session completed: {openrouter_client.format_session_summary(final_session)}")
+
+            # Send completion signals
+            await self.ws_manager.set_typing_indicator(orchestrator_agent_id, False)
+            await self.ws_manager.broadcast({
+                "type": "chat_stream",
+                "orchestrator_agent_id": orchestrator_agent_id,
+                "chunk": "",
+                "is_complete": True,
+            })
+
+            self.logger.chat_event(orchestrator_agent_id, response_text, sender="orchestrator")
+            self.logger.info(
+                f"OpenRouter execution complete | "
+                f"tokens: {input_tokens + output_tokens} | "
+                f"cost: ${cost_usd:.6f}"
+            )
+
+            return {
+                "ok": True,
+                "response": response_text.strip(),
+                "session_id": self.session_id,
+                "tools_used": tools_used,
+                "cost_usd": cost_usd,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "provider": "openrouter",
+                "model": runtime.orchestrator_model,
+                "provider_label": runtime.provider_label,
+            }
+
+        except openrouter_client.OpenRouterError as exc:
+            self.logger.error(f"OpenRouter streaming execution failed: {exc}", exc_info=True)
+            await self.ws_manager.set_typing_indicator(orchestrator_agent_id, False)
+
+            # Attempt provider fallback if enabled and this isn't already a fallback
+            if not getattr(self, '_is_fallback_execution', False):
+                try:
+                    self._is_fallback_execution = True
+                    return await self.handle_provider_fallback(
+                        orch_uuid=orch_uuid,
+                        orchestrator_agent_id=orchestrator_agent_id,
+                        user_message=user_message,
+                        primary_error=exc
+                    )
+                finally:
+                    self._is_fallback_execution = False
+            else:
+                # Already in fallback mode, just report the error
+                await self.ws_manager.broadcast_error(
+                    error_message="OpenRouter streaming execution failed",
+                    details={"error": str(exc), "provider": "openrouter"}
+                )
+                raise
+        except Exception as exc:  # noqa: BLE001
+            self.logger.error(f"OpenRouter streaming execution error: {exc}", exc_info=True)
+            await self.ws_manager.set_typing_indicator(orchestrator_agent_id, False)
+
+            # Attempt provider fallback if enabled and this isn't already a fallback
+            if not getattr(self, '_is_fallback_execution', False):
+                try:
+                    self._is_fallback_execution = True
+                    return await self.handle_provider_fallback(
+                        orch_uuid=orch_uuid,
+                        orchestrator_agent_id=orchestrator_agent_id,
+                        user_message=user_message,
+                        primary_error=exc
+                    )
+                finally:
+                    self._is_fallback_execution = False
+            else:
+                # Already in fallback mode, just report the error
+                await self.ws_manager.broadcast_error(
+                    error_message="OpenRouter streaming execution failed",
+                    details={"error": str(exc), "provider": "openrouter"}
+                )
+                raise
+
+    def _build_openrouter_messages(
+        self,
+        history_records: List[Dict[str, Any]],
+        user_message: str,
+        system_prompt: Optional[str],
+    ) -> List[Dict[str, str]]:
+        """Convert stored chat history into OpenAI-style message list."""
+        messages: List[Dict[str, str]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+
+        sorted_history = sorted(
+            history_records,
+            key=lambda msg: msg.get("created_at")
+            if isinstance(msg.get("created_at"), datetime)
+            else datetime.fromisoformat(msg.get("created_at")),
+        )
+
+        for record in sorted_history:
+            content = record.get("message")
+            if not content:
+                continue
+            sender = record.get("sender_type", "orchestrator")
+            role = "user" if sender == "user" else "assistant"
+            messages.append({"role": role, "content": content})
+
+        messages.append({"role": "user", "content": user_message})
+        return messages
+
+    async def _update_orchestrator_costs_entry(
+        self,
+        orch_uuid: uuid.UUID,
+        input_tokens: int,
+        output_tokens: int,
+        cost_usd: float,
+    ) -> None:
+        """Shared cost update routine for Claude and OpenRouter execution paths."""
         self.logger.debug(
             f"[OrchestratorService] Updating costs: "
             f"input_tokens={input_tokens}, output_tokens={output_tokens}, cost_usd=${cost_usd:.6f}"
         )
 
         try:
-            # Call database update and get detailed response
-            # IMPORTANT: Pass orchestrator_agent_id to ensure we only update THIS agent, not all agents
             update_result = await update_orchestrator_costs(
                 orchestrator_agent_id=orch_uuid,
                 input_tokens=input_tokens or 0,
@@ -878,7 +1221,6 @@ class OrchestratorService:
                 cost_usd=cost_usd or 0.0,
             )
 
-            # Log detailed results
             if update_result.get("success"):
                 self.logger.info(
                     f"✅ Updated orchestrator costs successfully:\n"
@@ -889,7 +1231,6 @@ class OrchestratorService:
                     f"  Updated At: {update_result.get('updated_at', 'N/A')}"
                 )
 
-                # Broadcast orchestrator update via WebSocket for live frontend updates
                 await self.ws_manager.broadcast_orchestrator_updated(
                     {
                         "id": update_result.get("id"),
@@ -897,6 +1238,7 @@ class OrchestratorService:
                         "output_tokens": update_result.get("output_tokens", 0),
                         "total_cost": update_result.get("total_cost", 0.0),
                         "updated_at": update_result.get("updated_at"),
+                        "provider": llm_settings.serialize_runtime(),
                     }
                 )
                 self.logger.debug("📡 Broadcast orchestrator cost update via WebSocket")
@@ -906,27 +1248,10 @@ class OrchestratorService:
                     f"  Error: {update_result.get('error', 'Unknown error')}\n"
                     f"  Rows Updated: {update_result.get('rows_updated', 0)}"
                 )
-
-        except Exception as e:
+        except Exception as exc:  # noqa: BLE001
             self.logger.error(
-                f"❌ Failed to update costs (exception): {e}", exc_info=True
+                f"❌ Failed to update costs (exception): {exc}", exc_info=True
             )
-
-        # Note: Each TextBlock chunk is saved individually as it streams in
-        # This allows real-time display in chat UI
-        self.logger.chat_event(
-            orchestrator_agent_id, response_text, sender="orchestrator"
-        )
-
-        return {
-            "ok": True,
-            "response": response_text.strip(),
-            "session_id": final_session_id or self.session_id,
-            "tools_used": tools_used,
-            "cost_usd": cost_usd,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-        }
 
     # ═══════════════════════════════════════════════════════════
     # HELPER METHODS - AI Summarization
@@ -1007,3 +1332,213 @@ class OrchestratorService:
             self.logger.error(
                 f"[OrchestratorService:Summary] Failed for system_log_id={log_id}: {e}"
             )
+
+    # ═══════════════════════════════════════════════════════════
+    # PROVIDER MANAGEMENT HELPERS
+    # ═══════════════════════════════════════════════════════════
+
+    def get_current_provider_info(self) -> Dict[str, Any]:
+        """
+        Get current provider information for logging and debugging.
+
+        Returns:
+            Dictionary with provider details including switch history
+        """
+        runtime = llm_settings.get_runtime_settings()
+        return {
+            "current_provider": runtime.provider_id,
+            "provider_label": runtime.provider_label,
+            "current_model": runtime.orchestrator_model,
+            "last_provider": self._last_provider_id,
+            "switch_count": self._provider_switch_count,
+            "updated_at": runtime.updated_at,
+        }
+
+    async def validate_provider_switch(
+        self, new_provider_id: str, new_model: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Validate if a provider switch is possible and what the impact would be.
+
+        Args:
+            new_provider_id: Target provider ID
+            new_model: Optional target model (uses provider default if None)
+
+        Returns:
+            Dictionary with validation results and cost estimates
+        """
+        try:
+            from . import llm_settings
+
+            # Get provider definitions
+            provider_def = llm_settings._get_provider(new_provider_id)
+            current_runtime = llm_settings.get_runtime_settings()
+
+            # Validate model availability
+            target_model = new_model or provider_def.default_model
+            if target_model not in provider_def.available_models:
+                return {
+                    "valid": False,
+                    "error": f"Model '{target_model}' not available for provider '{new_provider_id}'",
+                    "available_models": provider_def.available_models,
+                }
+
+            # Check environment readiness
+            missing_keys = []
+            if provider_def.required_env:
+                import os
+                for key in provider_def.required_env:
+                    if not os.getenv(key):
+                        missing_keys.append(key)
+
+            # Calculate cost comparison if we have recent usage data
+            cost_comparison = None
+            if self._last_provider_id and self._last_provider_id != new_provider_id:
+                # This is a simplified cost comparison
+                # In a real implementation, you might want to fetch recent usage from database
+                pass
+
+            return {
+                "valid": len(missing_keys) == 0,
+                "provider": {
+                    "id": provider_def.id,
+                    "label": provider_def.label,
+                    "description": provider_def.description,
+                    "icon": provider_def.icon,
+                    "target_model": target_model,
+                },
+                "missing_keys": missing_keys,
+                "cost_comparison": cost_comparison,
+                "is_switch": self._last_provider_id != new_provider_id,
+            }
+
+        except Exception as e:
+            self.logger.error(f"Provider validation failed: {e}")
+            return {
+                "valid": False,
+                "error": str(e),
+            }
+
+    async def handle_provider_fallback(
+        self,
+        orch_uuid: uuid.UUID,
+        orchestrator_agent_id: str,
+        user_message: str,
+        primary_error: Exception,
+    ) -> Dict[str, Any]:
+        """
+        Handle fallback to alternative provider if primary provider fails.
+
+        Args:
+            orch_uuid: Orchestrator UUID
+            orchestrator_agent_id: Orchestrator agent ID string
+            user_message: Original user message
+            primary_error: Error from primary provider
+
+        Returns:
+            Result from fallback provider or raises if no fallback available
+        """
+        current_runtime = llm_settings.get_runtime_settings()
+
+        # If current provider is OpenRouter, try falling back to Anthropic/Z.AI
+        if current_runtime.provider_id == "openrouter":
+            fallback_providers = ["anthropic", "zai"]
+        else:
+            # Try OpenRouter as fallback for other providers
+            fallback_providers = ["openrouter"]
+
+        self.logger.warning(
+            f"Primary provider {current_runtime.provider_id} failed: {primary_error}. "
+            f"Attempting fallback to: {fallback_providers}"
+        )
+
+        # Broadcast fallback attempt
+        await self.ws_manager.broadcast({
+            "type": "provider_fallback_attempt",
+            "primary_provider": current_runtime.provider_id,
+            "fallback_candidates": fallback_providers,
+            "error": str(primary_error),
+            "timestamp": datetime.now().isoformat(),
+        })
+
+        for fallback_provider_id in fallback_providers:
+            try:
+                # Temporarily switch provider
+                original_runtime = current_runtime
+                fallback_runtime = llm_settings.apply_provider_selection(
+                    provider_id=fallback_provider_id,
+                    orchestrator_model=original_runtime.orchestrator_model,
+                )
+
+                self.logger.info(f"Attempting fallback to provider: {fallback_provider_id}")
+
+                # Broadcast successful fallback switch
+                await self.ws_manager.broadcast({
+                    "type": "provider_fallback_switch",
+                    "from_provider": current_runtime.provider_id,
+                    "to_provider": fallback_provider_id,
+                    "model": fallback_runtime.orchestrator_model,
+                    "timestamp": datetime.now().isoformat(),
+                })
+
+                # Route to fallback provider
+                if fallback_provider_id == "openrouter":
+                    result = await self._process_with_openrouter(
+                        orch_uuid=orch_uuid,
+                        orchestrator_agent_id=orchestrator_agent_id,
+                        user_message=user_message,
+                        runtime=fallback_runtime,
+                    )
+                else:
+                    # Use standard Anthropic/Z.AI path by temporarily switching runtime
+                    llm_settings.set_runtime(fallback_runtime)
+                    try:
+                        # This will use the main execution path with the new runtime
+                        result = await self.process_user_message(user_message, orchestrator_agent_id)
+                        # Restore original runtime after processing
+                        llm_settings.set_runtime(original_runtime)
+                        return result
+                    finally:
+                        # Always restore original runtime
+                        llm_settings.set_runtime(original_runtime)
+
+                # Add fallback metadata to result
+                result["fallback_used"] = True
+                result["fallback_provider"] = fallback_provider_id
+                result["primary_error"] = str(primary_error)
+
+                # Broadcast fallback success
+                await self.ws_manager.broadcast({
+                    "type": "provider_fallback_success",
+                    "fallback_provider": fallback_provider_id,
+                    "result_cost": result.get("cost_usd", 0),
+                    "timestamp": datetime.now().isoformat(),
+                })
+
+                self.logger.info(
+                    f"Fallback to {fallback_provider_id} succeeded | "
+                    f"cost: ${result.get('cost_usd', 0):.6f}"
+                )
+
+                return result
+
+            except Exception as fallback_error:
+                self.logger.error(
+                    f"Fallback to {fallback_provider_id} also failed: {fallback_error}"
+                )
+                # Continue to next fallback candidate
+                continue
+
+        # All fallbacks failed
+        error_msg = f"All providers failed. Primary: {primary_error}. Fallbacks exhausted."
+        self.logger.error(error_msg)
+
+        await self.ws_manager.broadcast_error(
+            error_message="All LLM providers failed",
+            details={
+                "primary_error": str(primary_error),
+                "attempted_fallbacks": fallback_providers,
+            }
+        )
+
+        raise RuntimeError(error_msg) from primary_error
