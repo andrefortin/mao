@@ -22,7 +22,9 @@ from .openrouter_client import (
     calculate_context_usage_percentage,
     list_available_models,
     get_model_pricing,
-    OpenRouterError
+    OpenRouterError,
+    _validate_openrouter_endpoints,
+    _get_client_diagnostics
 )
 from . import database
 from .logger import get_logger
@@ -243,6 +245,17 @@ class HealthCheckResponse(BaseModel):
     consecutive_errors: int
     last_error_at: Optional[datetime]
     last_request_at: Optional[datetime]
+
+
+class OpenRouterErrorResponse(BaseModel):
+    """Enhanced error response for OpenRouter operations."""
+    error_type: str
+    status_code: Optional[int] = None
+    message: str
+    details: Dict[str, Any] = Field(default_factory=dict)
+    suggestions: List[str] = Field(default_factory=list)
+    retry_recommended: bool = False
+    alternative_methods: List[str] = Field(default_factory=list)
 
 
 class ModelListResponse(BaseModel):

@@ -314,22 +314,23 @@ const selectedModelInfo = ref<ModelInfo | null>(null)
 
 // Model suggestions (this would typically come from an API)
 const orchestratorSuggestions = computed(() => [
+  'x-ai/grok-4',
   'anthropic/claude-3.5-sonnet',
   'anthropic/claude-3-opus',
-  'x-ai/grok-4',
   'google/gemini-2.0-flash-exp',
   'openai/gpt-4o'
 ])
 
 const defaultAgentSuggestions = computed(() => [
-  'anthropic/claude-3.5-sonnet',
   'x-ai/grok-4',
+  'anthropic/claude-3.5-sonnet',
   'google/gemini-1.5-pro',
   'openai/gpt-4o',
   'meta-llama/llama-3.1-70b-instruct'
 ])
 
 const fastModelSuggestions = computed(() => [
+  'x-ai/grok-4.1-fast',
   'anthropic/claude-3-haiku',
   'x-ai/grok-4-mini',
   'google/gemini-1.5-flash',

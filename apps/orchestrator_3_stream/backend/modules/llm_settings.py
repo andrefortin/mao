@@ -97,8 +97,8 @@ PROVIDERS: Dict[str, ProviderDefinition] = {
         id="openrouter",
         label="OpenRouter",
         description="Unified access to 50+ models including Claude, GPT, Gemini, Llama, Mistral, and more.",
-        default_model="anthropic/claude-3.5-sonnet",
-        fast_model="microsoft/phi-3-mini-128k-instruct",
+        default_model="x-ai/grok-4",
+        fast_model="x-ai/grok-4.1-fast",
         available_models=[
             # Anthropic Models
             "anthropic/claude-3.5-sonnet",
@@ -159,6 +159,8 @@ PROVIDERS: Dict[str, ProviderDefinition] = {
             "stabilityai/stable-code-instruct",
 
             # X-AI Models
+            "x-ai/grok-4",
+            "x-ai/grok-4.1-fast",
             "x-ai/grok-2",
             "x-ai/grok-2-mini",
             "x-ai/grok-2-vision",

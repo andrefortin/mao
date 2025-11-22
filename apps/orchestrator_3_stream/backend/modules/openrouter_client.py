@@ -14,14 +14,33 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, APIStatusError, APIConnectionError
 from openai.types.chat import ChatCompletion, ChatCompletionMessageParam, ChatCompletionChunk
 from openai.types import CompletionUsage
 from pydantic import BaseModel
+from .logger import get_logger
+
+logger = get_logger()
 
 
 class OpenRouterError(RuntimeError):
     """Raised when OpenRouter responds with an error."""
+
+
+class OpenRouterMethodNotAllowedError(OpenRouterError):
+    """Raised when OpenRouter responds with 405 Method Not Allowed."""
+
+    def __init__(self, message: str, details: dict = None):
+        super().__init__(message)
+        self.details = details or {}
+
+
+class OpenRouterHTTPError(OpenRouterError):
+    """HTTP-specific error with status code and details."""
+    def __init__(self, message: str, status_code: int = None, response: dict = None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.response = response
 
 
 class TokenCostCategory(str, Enum):
@@ -310,6 +329,22 @@ _active_sessions: Dict[str, CostTrackingSession] = {}
 _CLIENT: AsyncOpenAI | None = None
 
 
+def _log_request_details(method: str, url: str, headers: dict, data: dict = None):
+    """Log detailed request information for debugging."""
+    logger.info(f"OpenRouter Request: {method} {url}")
+    logger.debug(f"Headers: {headers}")
+    if data:
+        logger.debug(f"Request data keys: {list(data.keys())}")
+
+
+def _get_endpoint_url(base_url: str, endpoint: str) -> str:
+    """Get endpoint URL without double slashes."""
+    # Remove leading slash from endpoint if base_url ends with slash
+    if endpoint.startswith('/') and base_url.endswith('/'):
+        endpoint = endpoint[1:]
+    return f"{base_url}{endpoint}"
+
+
 def _get_client() -> AsyncOpenAI:
     global _CLIENT
     if _CLIENT is not None:
@@ -320,6 +355,21 @@ def _get_client() -> AsyncOpenAI:
         raise OpenRouterError("OPENROUTER_API_KEY is not set")
 
     base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+
+    # VALIDATE URL FORMAT
+    original_base_url = base_url
+    if not base_url.endswith('/v1'):
+        logger.warning(f"OpenRouter base URL should end with /v1: {base_url}")
+        if not base_url.endswith('/'):
+            base_url = base_url + '/'
+        base_url = base_url + 'v1'
+
+    # Don't remove trailing slash here - let OpenAI client handle it
+    # Just ensure we don't have double /v1
+    if '/v1/v1' in base_url:
+        base_url = base_url.replace('/v1/v1', '/v1')
+
+    logger.info(f"OpenRouter client configured with base URL: {base_url}")
 
     headers: Dict[str, str] = {}
     site_url = os.getenv("OPENROUTER_SITE_URL")
@@ -345,6 +395,15 @@ async def create_completion(
 ) -> ChatCompletion:
     """Execute a standard (non-streaming) chat completion call."""
     client = _get_client()
+
+    # Log request details for debugging
+    _log_request_details(
+        method="POST",
+        url=_get_endpoint_url(str(client.base_url), "/chat/completions"),
+        headers=client.default_headers or {},
+        data={"model": model, "message_count": len(messages)}
+    )
+
     try:
         return await client.chat.completions.create(
             model=model,
@@ -353,7 +412,44 @@ async def create_completion(
             stream=False,
             max_tokens=max_tokens,
         )
-    except Exception as exc:  # noqa: BLE001
+    except APIStatusError as exc:
+        # Handle specific HTTP status codes
+        if exc.status_code == 405:
+            logger.error("=== OPENROUTER 405 ERROR DIAGNOSTICS ===")
+            logger.error(f"Base URL: {client.base_url}")
+            correct_url = _get_endpoint_url(str(client.base_url), "/chat/completions")
+            logger.error(f"Full Request URL: {correct_url}")
+            logger.error(f"HTTP Method: POST")
+            logger.error(f"Request Headers: {client.default_headers}")
+            api_key = os.getenv("OPENROUTER_API_KEY")
+            logger.error(f"API Key Present: {bool(api_key)}")
+            logger.error(f"API Key Prefix: {api_key[:8] + '...' if api_key else 'None'}")
+            if hasattr(exc, 'response') and exc.response:
+                logger.error(f"Response Headers: {dict(exc.response.headers)}")
+                logger.error(f"Response Body: {exc.response.text}")
+            logger.error("=== END DIAGNOSTICS ===")
+            raise OpenRouterMethodNotAllowedError(
+                message=f"HTTP 405 Method Not Allowed from OpenRouter",
+                details={
+                    "base_url": str(client.base_url),
+                    "request_url": _get_endpoint_url(str(client.base_url), "/chat/completions"),
+                    "method": "POST",
+                    "response_headers": dict(exc.response.headers) if exc.response else {},
+                    "response_body": exc.response.text if exc.response else None
+                }
+            ) from exc
+        else:
+            logger.error(f"OpenRouter API error {exc.status_code}: {exc.message}")
+            raise OpenRouterHTTPError(
+                f"OpenRouter API error {exc.status_code}: {exc.message}",
+                status_code=exc.status_code,
+                response=getattr(exc, 'response', None)
+            ) from exc
+    except APIConnectionError as exc:
+        logger.error(f"OpenRouter connection error: {exc}")
+        raise OpenRouterError(f"OpenRouter connection failed: {exc}") from exc
+    except Exception as exc:
+        logger.error(f"OpenRouter unexpected error: {exc}")
         raise OpenRouterError(f"OpenRouter request failed: {exc}") from exc
 
 
@@ -406,6 +502,15 @@ async def create_completion_stream(
 ) -> AsyncGenerator[ChatCompletionChunk, None]:
     """Execute a streaming chat completion call."""
     client = _get_client()
+
+    # Log request details for debugging
+    _log_request_details(
+        method="POST",
+        url=_get_endpoint_url(str(client.base_url), "/chat/completions"),
+        headers=client.default_headers or {},
+        data={"model": model, "message_count": len(messages), "stream": True}
+    )
+
     try:
         stream = await client.chat.completions.create(
             model=model,
@@ -416,7 +521,45 @@ async def create_completion_stream(
         )
         async for chunk in stream:
             yield chunk
-    except Exception as exc:  # noqa: BLE001
+    except APIStatusError as exc:
+        # Handle specific HTTP status codes
+        if exc.status_code == 405:
+            logger.error("=== OPENROUTER 405 ERROR DIAGNOSTICS (STREAMING) ===")
+            logger.error(f"Base URL: {client.base_url}")
+            correct_url = _get_endpoint_url(str(client.base_url), "/chat/completions")
+            logger.error(f"Full Request URL: {correct_url}")
+            logger.error(f"HTTP Method: POST")
+            logger.error(f"Request Headers: {client.default_headers}")
+            api_key = os.getenv("OPENROUTER_API_KEY")
+            logger.error(f"API Key Present: {bool(api_key)}")
+            logger.error(f"API Key Prefix: {api_key[:8] + '...' if api_key else 'None'}")
+            if hasattr(exc, 'response') and exc.response:
+                logger.error(f"Response Headers: {dict(exc.response.headers)}")
+                logger.error(f"Response Body: {exc.response.text}")
+            logger.error("=== END DIAGNOSTICS ===")
+            raise OpenRouterMethodNotAllowedError(
+                message=f"HTTP 405 Method Not Allowed from OpenRouter (streaming)",
+                details={
+                    "base_url": str(client.base_url),
+                    "request_url": _get_endpoint_url(str(client.base_url), "/chat/completions"),
+                    "method": "POST",
+                    "response_headers": dict(exc.response.headers) if exc.response else {},
+                    "response_body": exc.response.text if exc.response else None,
+                    "streaming": True
+                }
+            ) from exc
+        else:
+            logger.error(f"OpenRouter API streaming error {exc.status_code}: {exc.message}")
+            raise OpenRouterHTTPError(
+                f"OpenRouter API streaming error {exc.status_code}: {exc.message}",
+                status_code=exc.status_code,
+                response=getattr(exc, 'response', None)
+            ) from exc
+    except APIConnectionError as exc:
+        logger.error(f"OpenRouter streaming connection error: {exc}")
+        raise OpenRouterError(f"OpenRouter streaming connection failed: {exc}") from exc
+    except Exception as exc:
+        logger.error(f"OpenRouter streaming unexpected error: {exc}")
         raise OpenRouterError(f"OpenRouter streaming request failed: {exc}") from exc
 
 
@@ -746,6 +889,154 @@ def calculate_context_usage_percentage(model_id: str, input_tokens: int) -> Opti
     return (input_tokens / context_window) * 100
 
 
+async def _validate_openrouter_endpoints() -> bool:
+    """Validate that OpenRouter endpoints accept correct HTTP methods."""
+    try:
+        import httpx
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+
+        if not api_key:
+            logger.warning("Cannot validate OpenRouter endpoints: OPENROUTER_API_KEY not set")
+            return False
+
+        async with httpx.AsyncClient(timeout=10.0) as http_client:
+            # Test chat completions endpoint with OPTIONS request
+            response = await http_client.options(
+                _get_endpoint_url(base_url.rstrip('/'), "/chat/completions"),
+                headers={"Authorization": f"Bearer {api_key}"}
+            )
+            logger.info(f"OpenRouter OPTIONS /chat/completions: {response.status_code}")
+            logger.info(f"Allowed methods: {response.headers.get('Allow', 'Not specified')}")
+            return response.status_code in [200, 405]  # 405 is acceptable for OPTIONS
+    except Exception as exc:
+        logger.warning(f"Could not validate OpenRouter endpoints: {exc}")
+        return False
+
+
+def _get_client_diagnostics() -> dict:
+    """Get diagnostic information about OpenRouter client configuration."""
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+
+    return {
+        "api_key_set": bool(api_key),
+        "api_key_prefix": api_key[:8] + "..." if api_key else None,
+        "base_url": base_url,
+        "client_type": "openai.AsyncOpenAI",
+        "expected_methods": {
+            "chat_completions": "POST",
+            "models": "GET",
+            "pricing": "GET"
+        }
+    }
+
+
+async def create_completion_with_fallback(
+    messages: List[ChatCompletionMessageParam],
+    model: str,
+    temperature: float = 0,
+    max_tokens: Optional[int] = None,
+) -> ChatCompletion:
+    """Execute chat completion with fallback mechanisms."""
+
+    # Try standard approach first
+    try:
+        return await create_completion(messages, model, temperature, max_tokens)
+    except OpenRouterMethodNotAllowedError as exc:
+        logger.warning(f"Standard approach failed with 405, trying alternative configuration")
+
+        # Alternative 1: Try with different base URL format
+        try:
+            # FIX DOUBLE /v1 ISSUE
+            alt_base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip('/')
+            # Don't add /v1 if it's already there
+            if not alt_base_url.endswith('/v1'):
+                alt_base_url = alt_base_url + '/v1'
+
+            client = AsyncOpenAI(
+                api_key=os.getenv("OPENROUTER_API_KEY"),
+                base_url=alt_base_url,
+            )
+
+            return await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                stream=False,
+                max_tokens=max_tokens,
+            )
+        except Exception as fallback_exc:
+            logger.error(f"Alternative configuration also failed: {fallback_exc}")
+
+        # Alternative 2: Try direct HTTP request
+        try:
+            return await _direct_http_completion(messages, model, temperature, max_tokens)
+        except Exception as direct_exc:
+            logger.error(f"Direct HTTP request also failed: {direct_exc}")
+
+        # All attempts failed
+        raise OpenRouterError(
+            f"All OpenRouter connection methods failed. "
+            f"Original error: {exc}. "
+            f"Please check your OpenRouter API key and configuration."
+        )
+
+
+async def _direct_http_completion(
+    messages: List[ChatCompletionMessageParam],
+    model: str,
+    temperature: float = 0,
+    max_tokens: Optional[int] = None,
+) -> ChatCompletion:
+    """Direct HTTP request to OpenRouter API as fallback."""
+    import httpx
+    import json
+
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+
+    if not api_key:
+        raise OpenRouterError("OPENROUTER_API_KEY is not set for direct HTTP request")
+
+    request_data = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": False
+    }
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": os.getenv("OPENROUTER_SITE_URL", ""),
+        "X-Title": os.getenv("OPENROUTER_SITE_NAME", "")
+    }
+
+    logger.info(f"Attempting direct HTTP request to {base_url}/chat/completions")
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(
+            f"{base_url}/chat/completions",
+            json=request_data,
+            headers=headers,
+        )
+
+        if response.status_code == 405:
+            raise OpenRouterMethodNotAllowedError(
+                f"Direct HTTP request also returned 405. "
+                f"Response: {response.text}"
+            )
+        elif response.status_code != 200:
+            raise OpenRouterError(
+                f"Direct HTTP request failed with {response.status_code}: {response.text}"
+            )
+
+        # Convert response back to OpenAI format
+        return ChatCompletion.parse_raw(response.text)
+
+
 __all__ = [
     # Core client functions
     "create_completion",
@@ -784,6 +1075,16 @@ __all__ = [
     # Pricing database
     "OPENROUTER_PRICING_DB",
 
-    # Exception class
-    "OpenRouterError"
+    # Exception classes
+    "OpenRouterError",
+    "OpenRouterMethodNotAllowedError",
+    "OpenRouterHTTPError",
+
+    # Diagnostic functions
+    "_validate_openrouter_endpoints",
+    "_get_client_diagnostics",
+
+    # Fallback functions
+    "create_completion_with_fallback",
+    "_direct_http_completion"
 ]
